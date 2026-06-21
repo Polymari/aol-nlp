@@ -324,10 +324,11 @@ demo = gr.Interface(
         ["You agree to defend, indemnify and hold harmless the Company and its officers from and against any claims, liabilities, damages, losses, and expenses.", "electra-small"],
         ["We may modify these terms at any time without notice. Your continued use of the service constitutes acceptance of the new terms.", "electra-small"]
     ],
-    cache_examples=False
+    cache_examples=False,
+    theme=gr.themes.Soft()
 )
 
 
 
 if __name__ == "__main__":
-    demo.launch(theme=gr.themes.Soft(), ssr_mode=False)
+    demo.launch()
