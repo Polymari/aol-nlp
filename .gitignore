@@ -10,7 +10,7 @@ __pycache__/
 *$py.class
 
 # Trained models and checkpoints (weights are too large for Git and should be stored/retrieved from HF Hub)
-gotcha-extractor-model/
+# gotcha-extractor-model/
 
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
