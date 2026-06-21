@@ -1,8 +1,6 @@
 import os
 import re
-import json as json_lib
 import torch
-import torch.nn as nn
 import ftfy
 import gradio as gr
 from transformers import AutoTokenizer, AutoModelForTokenClassification, logging as tf_logging
@@ -11,45 +9,25 @@ tf_logging.disable_progress_bar()
 import nltk
 from nltk.tokenize import PunktSentenceTokenizer
 
-# Ensure NLTK model is downloaded
 try:
     nltk.data.find('tokenizers/punkt_tab')
 except LookupError:
     nltk.download('punkt_tab', quiet=True)
 
-# Global cache variables for the loaded models
-current_model = None
-current_tokenizer = None
-current_model_name = None
-
-# Fallback mappings for base pre-trained models
-fallback_map = {
-    "electra-small": "google/electra-small-discriminator",
-    "tinybert": "huawei-noah/TinyBERT_General_4L_312D",
-    "bert-tiny": "prajjwal1/bert-tiny",
-    "bert-mini": "prajjwal1/bert-mini"
-}
+MODEL_CACHE = {}
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 label2id = {'O': 0, 'B-RISK': 1, 'I-RISK': 2}
+id2label = {0: 'O', 1: 'B-RISK', 2: 'I-RISK'}
 
-def load_model_by_choice(choice):
-    global current_model, current_tokenizer, current_model_name
-    
-    if current_model_name == choice and current_model is not None:
-        return current_model, current_tokenizer
-        
-    local_path = f"./gotcha-extractor-model/{choice}-optuna-search"
-    if not os.path.exists(local_path) or not os.path.exists(os.path.join(local_path, "config.json")):
-        local_path = f"./gotcha-extractor-model/{choice}"
-    has_local = os.path.exists(local_path) and os.path.exists(os.path.join(local_path, "config.json"))
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+AVAILABLE_MODELS = ["electra-small", "tinybert", "bert-tiny", "bert-mini"]
 
-    if has_local:
-        model_path = local_path
-        print(f"Loading locally trained model from: {model_path}")
-    else:
-        model_path = fallback_map[choice]
-        print(f"Local trained model not found. Falling back to base model: {model_path}")
+def load_model(model_name):
+    if model_name in MODEL_CACHE:
+        return MODEL_CACHE[model_name]
+
+    model_path = os.path.join(BASE_DIR, "models", model_name)
+
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForTokenClassification.from_pretrained(
         model_path,
@@ -57,18 +35,15 @@ def load_model_by_choice(choice):
         id2label=id2label,
         label2id=label2id,
         ignore_mismatched_sizes=True
-    ).to(device)
+    )
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device)
     model.eval()
-    
-    current_model = model
-    current_tokenizer = tokenizer
-    current_model_name = choice
+
+    MODEL_CACHE[model_name] = (model, tokenizer)
     return model, tokenizer
 
-# Mappings
-id2label = {0: 'O', 1: 'B-RISK', 2: 'I-RISK'}
-
-# Critical keywords for risk level assignment and conditional highlighting
 KEYWORDS_HIGH = [
     r"arbitrat", r"class\s+action", r"waiver", r"dispute",
     r"reserve\s+the\s+right\s+to", r"modify", r"revise", r"update", r"without\s+notice",
@@ -76,7 +51,6 @@ KEYWORDS_HIGH = [
     r"cannot\s+(ensure|warrant|guarantee)", r"no\s+warranty", r"indemni"
 ]
 
-# Boilerplate patterns to filter out standard legal declarations
 BOILERPLATE_PATTERNS = [
     r"this\s+privacy\s+policy\s+(\([^)]+\)\s+)?describes\s+the\s+practices",
     r"this\s+privacy\s+policy\s+applies\s+only\s+to",
@@ -90,7 +64,6 @@ BOILERPLATE_PATTERNS = [
     r"privacy\s+policy\s+effective\s+date"
 ]
 
-# Pro-user keywords/phrases to suppress false positive risk flags (post-processing)
 KEYWORDS_PRO_USER = [
     r"you\s+may\s+(access|correct|request\s+deletion|delete|port|object)",
     r"request\s+that\s+we\s+stop\s+(any\s+)?processing",
@@ -106,24 +79,18 @@ KEYWORDS_PRO_USER = [
 ]
 
 def check_pro_user_override(sentence):
-    sentence_clean = sentence.strip()
-    sentence_lower = sentence_clean.lower()
-    
-    # Check pro-user keyword suppression list
+    sentence_lower = sentence.strip().lower()
+
     for pattern in KEYWORDS_PRO_USER:
         if re.search(pattern, sentence_lower):
             return True
-            
-    # Check rule-based segment overrides (heuristic patterns)
-    # Rule 1: Sentences explicitly defining rights to access, correct, delete, update or restrict processing of personal data
+
     if re.search(r"\b(right(s)?\s+to|you\s+have\s+the\s+right\s+to)\s+.*\b(access|correct|delete|erase|rectify|update|portability|restrict)\b", sentence_lower):
         return True
-        
-    # Rule 2: Sentences detailing options to browse/visit anonymously or opt out of optional tracking/cookies without restriction
+
     if re.search(r"\b(visit|browse)\b.*\banonymously\b", sentence_lower) and not re.search(r"\b(cannot|unable|restrict)\b", sentence_lower):
         return True
-        
-    # Rule 3: Explicit references to GDPR, CCPA, or other data protection rights that empower the user
+
     if re.search(r"\brights\s+related\s+to\b.*\b(gdpr|ccpa|california\s+consumer|protection\s+regulation)\b", sentence_lower):
         return True
 
@@ -132,117 +99,85 @@ def check_pro_user_override(sentence):
 def clean_boilerplate_header(sentence):
     sentence_clean = sentence.strip()
     sentence_lower = sentence_clean.lower()
-    
-    # 1. Skip short all-caps headers
+
     if re.match(r"^[A-Z\s\d/_:,\'\"]{3,50}$", sentence_clean):
         return True
-        
-    # 2. Skip matching boilerplate rules
+
     for pattern in BOILERPLATE_PATTERNS:
         if re.search(pattern, sentence_lower):
             return True
-            
+
     return False
 
 def determine_risk_level(sentence, risk_tokens, has_high_keyword):
     if not risk_tokens:
         return None
-        
+
     probs = [t["prob"] for t in risk_tokens]
     max_prob = max(probs)
-    
-    # Logic:
-    # 1. HIGH RISK (Red):
-    #    - Very high confidence prediction (P >= 0.80)
-    #    - OR contains a high-risk keyword and has high confidence (P >= 0.68)
+
     if max_prob >= 0.80 or (has_high_keyword and max_prob >= 0.68):
         return "HIGH RISK"
-        
-    # 2. MEDIUM RISK (Orange):
-    #    - Contains high-risk keyword (moderate confidence P >= 0.55)
-    #    - OR moderate confidence prediction (P >= 0.62)
     elif has_high_keyword or max_prob >= 0.62:
         return "MEDIUM RISK"
-        
-    # 3. LOW RISK (Yellow):
-    #    - Standard risk detection (fallback)
     else:
         return "LOW RISK"
 
 def clean_text_pipeline(raw_text):
-    # 1. Automatically fix Mojibake and encoding issues
     text = ftfy.fix_text(raw_text)
-    
-    # 2. Normalize hard wraps (single newlines between text) while preserving paragraph breaks (double newlines)
     text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
-    
-    # 3. Standardize consecutive spaces
     text = re.sub(r'[ \t]+', ' ', text)
-    
     return text.strip()
 
 def classify_text(raw_text, model_name="electra-small", min_risk_tokens=3):
     if not raw_text or not raw_text.strip():
         return []
-        
-    # Clean the input text via the NLP pipeline
+
     cleaned_text = clean_text_pipeline(raw_text)
-    
-    # Load chosen model and tokenizer dynamically
-    model, tokenizer = load_model_by_choice(model_name)
+    model, tokenizer = load_model(model_name)
     device = model.device
-    
-    # Get sentence spans to classify sentence-by-sentence
+
     sentence_spans = list(PunktSentenceTokenizer().span_tokenize(cleaned_text))
-    
+
     highlighted_data = []
     prev_end = 0
-    
+
     for start_idx, end_idx in sentence_spans:
-        # Append spacing/newlines between sentences
         if start_idx > prev_end:
             highlighted_data.append((cleaned_text[prev_end:start_idx], None))
-            
+
         sentence = cleaned_text[start_idx:end_idx]
         if not sentence.strip():
             highlighted_data.append((sentence, None))
             prev_end = end_idx
             continue
-            
-        # 1. Boilerplate / Header filter
+
         if clean_boilerplate_header(sentence):
             highlighted_data.append((sentence, None))
             prev_end = end_idx
             continue
-            
-        # 1.5 Pro-user override filter (suppresses false positives)
+
         if check_pro_user_override(sentence):
             highlighted_data.append((sentence, None))
             prev_end = end_idx
             continue
-            
-        # Tokenize sentence
+
         inputs = tokenizer(
-            sentence, 
-            return_tensors="pt", 
-            truncation=True, 
+            sentence,
+            return_tensors="pt",
+            truncation=True,
             max_length=512
         )
         tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
         inputs = {k: v.to(device) for k, v in inputs.items()}
-        
+
         with torch.no_grad():
             outputs = model(**inputs)
-        
-        # Handle both dict outputs (BiLSTM-CRF) and ModelOutput (transformers)
-        if isinstance(outputs, dict):
-            logits = outputs['logits'][0]
-        else:
-            logits = outputs.logits[0]
+
+        logits = outputs.logits[0]
         probs = torch.softmax(logits, dim=-1)
         predictions = torch.argmax(logits, dim=-1)
-        
-        # Count and extract risk tokens in this sentence
+
         risk_tokens = []
         for t_idx, pred in enumerate(predictions):
             label = id2label[pred.item()]
@@ -252,19 +187,17 @@ def classify_text(raw_text, model_name="electra-small", min_risk_tokens=3):
             prob = probs[t_idx][pred.item()].item()
             if label in ('B-RISK', 'I-RISK'):
                 risk_tokens.append({"token": token_str, "prob": prob})
-        
-        # 2. Heuristics & Conditional Threshold
+
         if len(risk_tokens) >= min_risk_tokens:
             max_prob = max(t["prob"] for t in risk_tokens)
-            
-            # Check high-risk keywords
+
             has_high_keyword = False
             sentence_lower = sentence.lower()
             for pattern in KEYWORDS_HIGH:
                 if re.search(pattern, sentence_lower):
                     has_high_keyword = True
                     break
-            
+
             keep = False
             if has_high_keyword:
                 if max_prob >= 0.55:
@@ -272,7 +205,7 @@ def classify_text(raw_text, model_name="electra-small", min_risk_tokens=3):
             else:
                 if max_prob >= 0.70:
                     keep = True
-                    
+
             if keep:
                 level = determine_risk_level(sentence, risk_tokens, has_high_keyword)
                 highlighted_data.append((sentence, level))
@@ -280,26 +213,24 @@ def classify_text(raw_text, model_name="electra-small", min_risk_tokens=3):
                 highlighted_data.append((sentence, None))
         else:
             highlighted_data.append((sentence, None))
-            
+
         prev_end = end_idx
-        
-    # Append any remaining characters at the end of the text
+
     if prev_end < len(cleaned_text):
         highlighted_data.append((cleaned_text[prev_end:], None))
-        
+
     return highlighted_data
 
-# Create Gradio interface
 demo = gr.Interface(
     fn=classify_text,
     inputs=[
         gr.Textbox(
-            lines=6, 
-            label="Terms of Service Text", 
+            lines=6,
+            label="Terms of Service Text",
             placeholder="Paste legal agreement clauses, privacy policy paragraphs, or user agreements here..."
         ),
         gr.Dropdown(
-            choices=["electra-small", "tinybert", "bert-tiny", "bert-mini"],
+            choices=AVAILABLE_MODELS,
             value="electra-small",
             label="Select Extraction Model"
         )
@@ -315,20 +246,19 @@ demo = gr.Interface(
     ),
     title="ToS 'Gotcha' Clause Extractor",
     description=(
-        "Analyze Terms of Service and Privacy Policies instantly. This app supports switching between multiple "
-        "trained models to detect user-unfavorable clauses such as forced arbitration, class action waivers, "
-        "and data-selling agreements."
+        "Analyze Terms of Service and Privacy Policies instantly. "
+        "This app supports switching between multiple fine-tuned models "
+        "to detect user-unfavorable clauses such as forced arbitration, "
+        "class action waivers, and data-selling agreements."
     ),
     examples=[
         ["Welcome to the platform. By continuing, you agree to forced arbitration in the event of a dispute. We also reserve the right to sell your location data and usage habits to unverified third parties.", "electra-small"],
         ["You agree to defend, indemnify and hold harmless the Company and its officers from and against any claims, liabilities, damages, losses, and expenses.", "electra-small"],
         ["We may modify these terms at any time without notice. Your continued use of the service constitutes acceptance of the new terms.", "electra-small"]
     ],
-    cache_examples=False,
-    theme=gr.themes.Soft()
+    cache_examples=False
 )
 
 
-
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(theme=gr.themes.Soft(), ssr_mode=False)
