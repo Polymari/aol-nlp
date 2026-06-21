@@ -16,3 +16,4 @@ pyarrow
 nltk
 fsspec>=2024.10.0
 ftfy
+gradio<5.0.0
