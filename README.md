@@ -8,7 +8,7 @@ sdk_version: "4.44.1"
 python_version: "3.10"
 app_file: app.py
 pinned: false
-short_description: Detect risky clauses in Terms of Service and Privacy Policies
+short_description: Detect risky clauses in ToS and policies
 tags:
   - nlp
   - token-classification
