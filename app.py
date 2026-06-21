@@ -25,62 +25,12 @@ current_model_name = None
 # Fallback mappings for base pre-trained models
 fallback_map = {
     "electra-small": "google/electra-small-discriminator",
-    "albert-base": "albert-base-v2",
     "tinybert": "huawei-noah/TinyBERT_General_4L_312D",
-    "legal-bert": "nlpaueb/legal-bert-base-uncased",
-    "bilstm-crf": None  # No HF fallback; must be trained locally
+    "bert-tiny": "prajjwal1/bert-tiny",
+    "bert-mini": "prajjwal1/bert-mini"
 }
 
 label2id = {'O': 0, 'B-RISK': 1, 'I-RISK': 2}
-
-# ---------- BiLSTM-CRF model definition (must match train_gotcha.ipynb Cell 6) ----------
-from torchcrf import CRF as TorchCRF
-
-class DummyConfig:
-    def __init__(self, num_labels, id2label, label2id):
-        self.num_labels = num_labels
-        self.id2label = id2label
-        self.label2id = label2id
-
-class BiLSTM_CRF(nn.Module):
-    def __init__(self, vocab_size, num_tags, embedding_dim=128, hidden_dim=256):
-        super(BiLSTM_CRF, self).__init__()
-        self.embedding = nn.Embedding(vocab_size, embedding_dim)
-        self.lstm = nn.LSTM(embedding_dim, hidden_dim // 2, num_layers=1, bidirectional=True, batch_first=True)
-        self.hidden2tag = nn.Linear(hidden_dim, num_tags)
-        self.crf = TorchCRF(num_tags, batch_first=True)
-        self.config = DummyConfig(num_tags, id2label, label2id)
-
-    def forward(self, input_ids, attention_mask=None, labels=None, **kwargs):
-        embeds = self.embedding(input_ids)
-        lstm_out, _ = self.lstm(embeds)
-        emissions = self.hidden2tag(lstm_out)
-        if attention_mask is not None:
-            mask = attention_mask.to(torch.bool)
-        else:
-            mask = torch.ones(input_ids.shape, dtype=torch.bool, device=input_ids.device)
-        if labels is not None:
-            clean_labels = labels.clone()
-            clean_labels[clean_labels == -100] = 0
-            loss = -self.crf(emissions, clean_labels, mask=mask, reduction='token_mean')
-            return {'loss': loss, 'logits': emissions}
-        else:
-            return {'logits': emissions}
-
-    @classmethod
-    def from_pretrained(cls, load_directory, **kwargs):
-        with open(os.path.join(load_directory, "config.json"), "r") as f:
-            config = json_lib.load(f)
-        model = cls(
-            vocab_size=config["vocab_size"],
-            num_tags=config["num_labels"],
-            embedding_dim=config["embedding_dim"],
-            hidden_dim=config["hidden_dim"]
-        )
-        weights_path = os.path.join(load_directory, "pytorch_model.bin")
-        if os.path.exists(weights_path):
-            model.load_state_dict(torch.load(weights_path, map_location="cpu"))
-        return model
 
 def load_model_by_choice(choice):
     global current_model, current_tokenizer, current_model_name
@@ -94,33 +44,21 @@ def load_model_by_choice(choice):
     has_local = os.path.exists(local_path) and os.path.exists(os.path.join(local_path, "config.json"))
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    if choice == "bilstm-crf":
-        if has_local:
-            tokenizer = AutoTokenizer.from_pretrained("google/electra-small-discriminator")
-            model = BiLSTM_CRF.from_pretrained(local_path).to(device)
-            model.eval()
-            print(f"Loaded BiLSTM-CRF from: {local_path}")
-        else:
-            raise FileNotFoundError(
-                f"BiLSTM-CRF weights not found at {local_path}. "
-                "Please train the model first using train_gotcha.ipynb Cell 10."
-            )
+    if has_local:
+        model_path = local_path
+        print(f"Loading locally trained model from: {model_path}")
     else:
-        if has_local:
-            model_path = local_path
-            print(f"Loading locally trained model from: {model_path}")
-        else:
-            model_path = fallback_map[choice]
-            print(f"Local trained model not found. Falling back to base model: {model_path}")
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        model = AutoModelForTokenClassification.from_pretrained(
-            model_path,
-            num_labels=len(label2id),
-            id2label=id2label,
-            label2id=label2id,
-            ignore_mismatched_sizes=True
-        ).to(device)
-        model.eval()
+        model_path = fallback_map[choice]
+        print(f"Local trained model not found. Falling back to base model: {model_path}")
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model = AutoModelForTokenClassification.from_pretrained(
+        model_path,
+        num_labels=len(label2id),
+        id2label=id2label,
+        label2id=label2id,
+        ignore_mismatched_sizes=True
+    ).to(device)
+    model.eval()
     
     current_model = model
     current_tokenizer = tokenizer
@@ -361,7 +299,7 @@ demo = gr.Interface(
             placeholder="Paste legal agreement clauses, privacy policy paragraphs, or user agreements here..."
         ),
         gr.Dropdown(
-            choices=["electra-small", "albert-base", "tinybert", "legal-bert", "bilstm-crf"],
+            choices=["electra-small", "tinybert", "bert-tiny", "bert-mini"],
             value="electra-small",
             label="Select Extraction Model"
         )
@@ -385,10 +323,11 @@ demo = gr.Interface(
         ["Welcome to the platform. By continuing, you agree to forced arbitration in the event of a dispute. We also reserve the right to sell your location data and usage habits to unverified third parties.", "electra-small"],
         ["You agree to defend, indemnify and hold harmless the Company and its officers from and against any claims, liabilities, damages, losses, and expenses.", "electra-small"],
         ["We may modify these terms at any time without notice. Your continued use of the service constitutes acceptance of the new terms.", "electra-small"]
-    ]
+    ],
+    cache_examples=False
 )
 
 
 
 if __name__ == "__main__":
-    demo.launch(theme=gr.themes.Soft())
+    demo.launch(theme=gr.themes.Soft(), ssr_mode=False)
