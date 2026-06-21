@@ -22,3 +22,5 @@ Thumbs.db
 # Backup and log files
 *.bak
 *.log
+logs.txt
+gotcha_space_git/
