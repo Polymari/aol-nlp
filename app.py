@@ -26,7 +26,24 @@ def load_model(model_name):
     if model_name in MODEL_CACHE:
         return MODEL_CACHE[model_name]
 
-    model_path = os.path.join(BASE_DIR, "models", model_name)
+    local_path = os.path.join(BASE_DIR, "gotcha-extractor-model", model_name)
+    if not os.path.exists(os.path.join(local_path, "config.json")):
+        local_path = os.path.join(BASE_DIR, "models", model_name)
+        
+    has_local = os.path.exists(local_path) and os.path.exists(os.path.join(local_path, "config.json"))
+    
+    if has_local:
+        model_path = local_path
+        print(f"Loading local model from: {model_path}")
+    else:
+        fallback_map = {
+            "electra-small": "google/electra-small-discriminator",
+            "tinybert": "huawei-noah/TinyBERT_General_4L_312D",
+            "bert-tiny": "prajjwal1/bert-tiny",
+            "bert-mini": "prajjwal1/bert-mini"
+        }
+        model_path = fallback_map.get(model_name, "google/electra-small-discriminator")
+        print(f"Local model not found. Falling back to HF Hub: {model_path}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForTokenClassification.from_pretrained(
@@ -256,9 +273,10 @@ demo = gr.Interface(
         ["You agree to defend, indemnify and hold harmless the Company and its officers from and against any claims, liabilities, damages, losses, and expenses.", "electra-small"],
         ["We may modify these terms at any time without notice. Your continued use of the service constitutes acceptance of the new terms.", "electra-small"]
     ],
-    cache_examples=False
+    cache_examples=False,
+    theme=gr.themes.Soft()
 )
 
 
 if __name__ == "__main__":
-    demo.launch(theme=gr.themes.Soft(), ssr_mode=False)
+    demo.launch()
