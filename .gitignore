@@ -1,0 +1,24 @@
+# Python virtual environment
+.venv/
+
+# AI Agent configuration/skills
+.agents/
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Trained models and checkpoints (weights are too large for Git and should be stored/retrieved from HF Hub)
+gotcha-extractor-model/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Backup and log files
+*.bak
+*.log

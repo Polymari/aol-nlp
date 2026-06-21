@@ -1,0 +1,224 @@
+================================================================================
+          "GOTCHA EXTRACTOR" NLP PIPELINE - ARCHITECTURAL OVERVIEW
+================================================================================
+
+This document details the complete end-to-end Natural Language Processing (NLP) 
+pipeline for the ToS "Gotcha" Clause Extractor. The pipeline detects, classifies, 
+and highlights unfair or risky clauses (e.g., forced arbitration, unilateral 
+terms modification, data selling) in legal documents (Terms of Service, Privacy 
+Policies).
+
+Below is the conceptual structure of the pipeline, divided into 7 distinct phases:
+
+  [ Data Sources ] ---> [ 1. Data Ingestion & Augmentation ]
+                                    |
+                                    v
+                        [ 2. Data Parsing & Alignment ]
+                                    |
+                                    v
+                        [ 3. Preprocessing Pipeline ]
+                                    |
+                                    v
+                     [ 4. Tokenization & BIO Alignment ]
+                                    |
+                                    v
+                      [ 5. Model Fine-Tuning & HPO ]
+                                    |
+                                    v
+                      [ 6. Inference Pipeline & Segmentation ]
+                                    |
+                                    v
+                       [ 7. Post-Processing & Heuristics ]
+                                    |
+                                    v
+                             [ Gradio Web UI ]
+
+---
+
+1. DATA INGESTION & AUGMENTION
+================================================================================
+To train a supervised token classifier, data is ingested from three primary 
+sources:
+
+  A. CodeHima/TOS_Dataset (Hugging Face Hub):
+     Provides sentence-level text labeled with legal unfairness categories:
+     - "clearly_fair" (Treat as neutral)
+     - "potentially_unfair" (Treat as gotcha)
+     - "clearly_unfair" (Treat as gotcha - critical bug recovery fixed this mapping)
+
+  B. EE21/ToS-Summaries (Hugging Face Hub):
+     Provides document-level terms plain text paired with summaries of 
+     unfair/problematic clauses.
+
+  C. Synthetic Data (DeepSeek V4 Flash - Local Augmentation):
+     To address extreme class imbalance, 3,479 synthetic unfair sentences were 
+     generated across four risk categories (arbitration, unilateral modification, 
+     data selling, and indemnification) and saved in:
+     `corpus/synthetic_gotchas.json`
+
+  *Data Discipline Split Strategy:*
+  To prevent data leakage, the human-labeled datasets are split into Training (85%) 
+  and Test (15%) sets *first*. The synthetic data is merged *exclusively* into 
+  the training split. The test split remains 100% real, human-labeled data, 
+  ensuring true evaluation metrics.
+
+
+2. DATA PARSING & ALIGNMENT (TRAINING)
+================================================================================
+Raw datasets are processed and aligned into a standardized schema: 
+`{"text": str, "gotchas": list[str]}` where the `gotchas` list contains substrings 
+found in `text` that represent risk clauses.
+
+  A. CodeHima Parser Alignment (Mixed-Context Creation):
+     Instead of feeding isolated unfair sentences into the model (which leads to 
+     pathological all-or-nothing token patterns), each unfair sentence is paired 
+     with a random neutral sentence:
+     `combined_text = context_sentence + " " + gotcha_sentence`
+     This forces the model to learn token-level sequence classification (finding 
+     the transition boundary from neutral to risk) rather than cheating via 
+     document-level binary shortcuts.
+
+  B. EE21 Parser Alignment (Word Overlap Heuristic):
+     For full-length documents, sentences matching summaries are extracted by 
+     computing word overlap:
+     `overlap = len(set(summary_words).intersection(set(sentence_words)))`
+     If overlap >= 3, the sentence is marked as an exact gotcha substring. If no 
+     overlap is found, the document is retained as a negative (neutral) example 
+     (retaining valuable negative training context).
+
+
+3. PREPROCESSING PIPELINE
+================================================================================
+Legal texts often suffer from bad encodings (Mojibake), pdf extraction issues, 
+and formatting inconsistencies. Both the training and inference pipelines run 
+raw text through a deterministic cleanup step:
+
+  1. Mojibake Recovery (using `ftfy` library):
+     Detangles broken utf-8 sequences (e.g., `â€œ` -> `"`, `â€™` -> `'`) safely.
+  2. Hard Wrap Normalization:
+     Replaces single line breaks (`(?<!\n)\n(?!\n)`) with spaces to prevent 
+     sentences from being split in half, while keeping double newlines to 
+     preserve legal paragraph structures.
+  3. Space Standardization:
+     Collapses tabs and consecutive spaces (`[ \t]+`) into a single space.
+
+
+4. TOKENIZATION & BIO ALIGNMENT
+================================================================================
+Before text is fed to a Transformer, it must be tokenized and aligned to BIO tags.
+
+  A. Sub-word Tokenization:
+     Tokenization breaks sentences down into sub-word units (e.g., "arbitration" 
+     -> ["arbit", "##ration"]).
+
+  B. Label Map Definition:
+     - `O` (0)      : Outside of a risk clause (normal text)
+     - `B-RISK` (1) : Beginning of a risk clause (the starting sub-token)
+     - `I-RISK` (2) : Inside/continuation of a risk clause (following sub-tokens)
+     - `-100`       : Ignore index for PyTorch (assigned to special tokens like 
+                      `[CLS]`, `[SEP]`, or padding, so they don't contribute 
+                      to loss/gradients).
+
+  C. Offset Alignment Logic:
+     Using tokenizers' `return_offsets_mapping=True`, the character positions of 
+     detected gotcha substrings are aligned to token indices:
+     - If a token's start character falls within the start and end indices of a 
+       gotcha, it gets labeled.
+     - The first token inside the span receives `B-RISK`.
+     - Sub-tokens that continue the span receive `I-RISK`.
+
+
+5. MODEL FINE-TUNING, CUSTOM LOSS, & OPTUNA OPTIMIZATION
+================================================================================
+The pipeline fine-tunes sequence-labeling models utilizing specialized 
+techniques:
+
+  A. Model Lineup:
+     - ELECTRA-Small-Discriminator (`google/electra-small-discriminator` - ~14M parameters)
+     - BERT-Tiny (`prajjwal1/bert-tiny` - ~4.4M parameters)
+     - BERT-Mini (`prajjwal1/bert-mini` - ~11M parameters)
+     - TinyBERT 4-Layer (`huawei-noah/TinyBERT_General_4L_312D` - ~14M parameters)
+     - LegalBERT (`nlpaueb/legal-bert-base-uncased` - ~110M parameters)
+     - Custom BiLSTM-CRF (~9M parameters, trained from scratch utilizing CRF transitions)
+
+  B. Inverse-Sqrt Class-Weighted Loss (WeightedLossTrainer):
+     The token distribution is heavily skewed toward `O` (O ~80%, B-RISK ~1%, 
+     I-RISK ~19%). Under normal cross-entropy, the model overpredicts background 
+     `O` tags. A custom trainer scales the loss weights:
+     `weight = torch.tensor([0.38, 4.70, 1.00])`
+     This heavily penalizes errors on rare `B-RISK` tag starts (4.7x vs 0.38x).
+
+  C. Selective Layer Freezing:
+     To prevent overfitting on the small legal corpus, bottom encoder layers and 
+     embeddings are frozen. For instance, in LegalBERT, only the top 4 layers and 
+     the classification head remain active, reducing trainable parameters by ~65%.
+
+  D. Optuna Hyperparameter Optimization:
+     Automatically searches the configuration space:
+     - `learning_rate` (log-scale: 1e-5 to 8e-5)
+     - `weight_decay` (0.0 to 0.15)
+     - `warmup_ratio` (0.05 to 0.25)
+     - `per_device_train_batch_size` (8 or 16)
+     - `num_frozen_layers` (dynamic based on the specific model structure)
+     Optimizes for validation F1 score (using seqeval) rather than accuracy.
+
+
+6. INFERENCE PIPELINE & SENTENCE SEGMENTATION
+================================================================================
+During inference (in `aol.ipynb` or the Gradio app), raw document text is 
+processed using a sentence-centric density approach:
+
+  1. Raw Text Cleanup: Runs text through `clean_text_pipeline()` (Phase 3).
+  2. Sentence Tokenization: Segments text into grammatical sentence boundaries 
+     using NLTK's `PunktSentenceTokenizer`.
+  3. Pre-Filters (Heuristic Speed Bypass):
+     Before running heavy neural models, two static filters run:
+     - Boilerplate Header Filter: Skips short all-caps headers (e.g. "PRIVACY POLICY") 
+       or typical standard definitions.
+     - Pro-User Rights Suppression: Intercepts user-empowering rights (GDPR/CCPA, 
+       anonymous browsing, access/rectification details) to eliminate false 
+       positive risk tags.
+  4. Neural Inference:
+     For each candidate sentence:
+     - Tokenize (truncated to max length 512).
+     - Run model forward pass to compute logits.
+     - Convert logits to soft probabilities via softmax, and predictions via argmax.
+     - Extract tokens predicted as `B-RISK` or `I-RISK`.
+
+
+7. POST-PROCESSING HEURISTICS & ORDINAL RISK LEVELING
+================================================================================
+Raw token classifications are translated into final visual highlights using 
+rules and thresholds:
+
+  A. IO Fallback Decoding:
+     Instead of requiring a strict `B-RISK` start (which can lead to 0 gotcha 
+     extractions if the model misses the boundary), the decoder falls back to 
+     identifying any contiguous block of risk tags (`B-RISK` or `I-RISK`).
+
+  B. Token Density Threshold:
+     To filter out stray predicted sub-words, a sentence must contain at least 
+     `min_risk_tokens >= 3` to be flagged as a gotcha.
+
+  C. Conditional Confidence Thresholding:
+     Balances high recall and precision based on keyword presence:
+     - If the sentence matches high-severity keywords (arbitration, class action, 
+       waiver, modify, sell, etc.), the minimum required classification confidence 
+       is lowered to `max_prob >= 0.55`.
+     - Otherwise, the confidence threshold is raised to `max_prob >= 0.70` to 
+       filter out low-confidence background text.
+
+  D. Ordinal Risk Classification:
+     Once a sentence passes the filters, its threat level is evaluated:
+     - HIGH RISK (Red):
+       `max_prob >= 0.80` OR (`has_high_keyword` AND `max_prob >= 0.68`)
+     - MEDIUM RISK (Orange):
+       (`has_high_keyword` AND `max_prob >= 0.55`) OR `max_prob >= 0.62`
+     - LOW RISK (Yellow):
+       Fallback (low confidence risk detection)
+
+  E. Highlight Presentation:
+     The text is reconstructed in the Gradio Web interface, displaying clean 
+     sentence-level annotations color-coded by threat level to preserve high 
+     explainability.
+================================================================================
