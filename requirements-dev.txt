@@ -1,0 +1,10 @@
+-r requirements.txt
+pytest
+optuna
+datasets
+evaluate
+seqeval
+accelerate
+matplotlib
+pyarrow
+fastparquet

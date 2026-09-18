@@ -1,266 +1,23 @@
 import os
 import re
 import time
-import torch
-import ftfy
-import nltk
-from nltk.tokenize import PunktSentenceTokenizer
 import pandas as pd
 import gradio as gr
-from transformers import AutoTokenizer, AutoModelForTokenClassification, logging as tf_logging
 
-tf_logging.set_verbosity_error()
-tf_logging.disable_progress_bar()
+from gotcha import (
+    AVAILABLE_MODELS,
+    MODEL_META,
+    COLOR_MAP,
+    clean_text_pipeline,
+    classify_text,
+    compare_models as gotcha_compare_models,
+    get_inference_device
+)
 
-# Download NLTK data securely
-for pkg in ['punkt', 'punkt_tab']:
-    try:
-        nltk.data.find(f'tokenizers/{pkg}')
-    except LookupError:
-        nltk.download(pkg, quiet=True)
-
-MODEL_CACHE = {}
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-label2id = {'O': 0, 'B-RISK': 1, 'I-RISK': 2}
-id2label = {0: 'O', 1: 'B-RISK', 2: 'I-RISK'}
 
-AVAILABLE_MODELS = ["electra-small", "tinybert", "bert-mini", "bert-tiny"]
-
-# Static model metadata for UI
-MODEL_META = {
-    "electra-small": {
-        "name": "ELECTRA-Small (Fine-tuned)",
-        "params": "13.5M",
-        "size": "51.5 MB",
-        "desc": "Best overall accuracy and F1 score. Balanced size and high reliability.",
-        "badge_class": "badge-electra",
-        "best_f1": "47.3%"
-    },
-    "tinybert": {
-        "name": "TinyBERT (Fine-tuned)",
-        "params": "14.3M",
-        "size": "54.4 MB",
-        "desc": "Standard compressed BERT model. Moderately accurate but slower than ELECTRA.",
-        "badge_class": "badge-tinybert",
-        "best_f1": "23.4%"
-    },
-    "bert-mini": {
-        "name": "BERT-Mini (Fine-tuned)",
-        "params": "11.1M",
-        "size": "42.4 MB",
-        "desc": "Lightweight BERT variant. Fast execution with reasonable accuracy.",
-        "badge_class": "badge-mini",
-        "best_f1": "21.2%"
-    },
-    "bert-tiny": {
-        "name": "BERT-Tiny (Fine-tuned)",
-        "params": "4.4M",
-        "size": "16.7 MB",
-        "desc": "Ultra-lightweight model. Extremely fast with very low resource usage but lower accuracy.",
-        "badge_class": "badge-tiny",
-        "best_f1": "2.6%"
-    }
-}
-
-def load_model(model_name):
-    if model_name in MODEL_CACHE:
-        return MODEL_CACHE[model_name]
-
-    local_path = os.path.join(BASE_DIR, "gotcha-extractor-model", model_name)
-    has_local = os.path.exists(local_path) and os.path.exists(os.path.join(local_path, "config.json"))
-    
-    if has_local:
-        model_path = local_path
-        print(f"Loading local model weights from: {model_path}")
-    else:
-        fallback_map = {
-            "electra-small": "google/electra-small-discriminator",
-            "tinybert": "huawei-noah/TinyBERT_General_4L_312D",
-            "bert-tiny": "prajjwal1/bert-tiny",
-            "bert-mini": "prajjwal1/bert-mini"
-        }
-        model_path = fallback_map.get(model_name, "google/electra-small-discriminator")
-        print(f"Local model '{model_name}' weights not found. Warning: falling back to base pre-trained model: {model_path}")
-
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForTokenClassification.from_pretrained(
-        model_path,
-        num_labels=len(label2id),
-        id2label=id2label,
-        label2id=label2id,
-        ignore_mismatched_sizes=True
-    )
-
-    # Force CPU to avoid sandboxed CUDA hangs if needed
-    device = "cuda" if torch.cuda.is_available() and os.environ.get("CUDA_VISIBLE_DEVICES") != "" else "cpu"
-    model = model.to(device)
-    model.eval()
-
-    MODEL_CACHE[model_name] = (model, tokenizer)
-    return model, tokenizer
-
-KEYWORDS_HIGH = [
-    r"arbitrat", r"class\s+action", r"waiver", r"dispute",
-    r"reserve\s+the\s+right\s+to", r"modify", r"revise", r"update", r"without\s+notice",
-    r"sell", r"market", r"advertis", r"third\s+part",
-    r"cannot\s+(ensure|warrant|guarantee)", r"no\s+warranty", r"indemni"
-]
-
-BOILERPLATE_PATTERNS = [
-    r"this\s+privacy\s+policy\s+(\([^)]+\)\s+)?describes\s+the\s+practices",
-    r"this\s+privacy\s+policy\s+applies\s+only\s+to",
-    r"summary\s+the\s+notifications\s+provided\s+by\s+this\s+privacy\s+policy\s+include",
-    r"^[a-zA-Z\s]+is\s+data\s+that\s+can\s+be\s+used\s+to\s+identify",
-    r"^[a-zA-Z\s]+\s+means\s+any\s+information",
-    r"legal\s+grounds\s+for\s+processing\s+personal\s+data",
-    r"we\s+restrict\s+access\s+to\s+personal\s+information\s+collected.*to\s+our\s+employees",
-    r"please\s+note\s+that\s+we\s+have\s+a\s+separate\s+privacy\s+disclosure\s+statement\s+to\s+address\s+our\s+protocols.*located\s+here",
-    r"children\s+under\s+13", r"younger\s+than\s+13", r"receive\s+parental\s+consent",
-    r"privacy\s+policy\s+effective\s+date"
-]
-
-KEYWORDS_PRO_USER = [
-    r"you\s+may\s+(access|correct|request\s+deletion|delete|port|object)",
-    r"request\s+that\s+we\s+stop\s+(any\s+)?processing",
-    r"freely\s+visit\s+our\s+(website|platform)\s+anonymously",
-    r"without\s+being\s+required\s+to\s+provide\s+us\s+with\s+any\s+personal\s+information",
-    r"rights\s+related\s+to\s+the\s+european\s+union",
-    r"rights\s+related\s+to\s+gdpr",
-    r"your\s+right\s+to\s+(access|delete|rectify|restrict)",
-    r"opt[- ]out\s+of\s+receiving\s+(marketing|promotional|newsletter)",
-    r"under\s+the\s+general\s+data\s+protection\s+regulation",
-    r"right\s+to\s+request\s+that\s+we\s+disclose",
-    r"right\s+to\s+know\s+what\s+personal\s+information",
-]
-
-def check_pro_user_override(sentence):
-    sentence_lower = sentence.strip().lower()
-    for pattern in KEYWORDS_PRO_USER:
-        if re.search(pattern, sentence_lower):
-            return True
-    if re.search(r"\b(right(s)?\s+to|you\s+have\s+the\s+right\s+to)\s+.*\b(access|correct|delete|erase|rectify|update|portability|restrict)\b", sentence_lower):
-        return True
-    if re.search(r"\b(visit|browse)\b.*\banonymously\b", sentence_lower) and not re.search(r"\b(cannot|unable|restrict)\b", sentence_lower):
-        return True
-    if re.search(r"\brights\s+related\s+to\b.*\b(gdpr|ccpa|california\s+consumer|protection\s+regulation)\b", sentence_lower):
-        return True
-    return False
-
-def clean_boilerplate_header(sentence):
-    sentence_clean = sentence.strip()
-    sentence_lower = sentence_clean.lower()
-    if re.match(r"^[A-Z\s\d/_:,\'\"]{3,50}$", sentence_clean):
-        return True
-    for pattern in BOILERPLATE_PATTERNS:
-        if re.search(pattern, sentence_lower):
-            return True
-    return False
-
-def determine_risk_level(sentence, risk_tokens, has_high_keyword):
-    if not risk_tokens:
-        return None
-    probs = [t["prob"] for t in risk_tokens]
-    max_prob = max(probs)
-    if max_prob >= 0.80 or (has_high_keyword and max_prob >= 0.68):
-        return "HIGH RISK"
-    elif has_high_keyword or max_prob >= 0.62:
-        return "MEDIUM RISK"
-    else:
-        return "LOW RISK"
-
-def clean_text_pipeline(raw_text):
-    text = ftfy.fix_text(raw_text)
-    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
-    text = re.sub(r'[ \t]+', ' ', text)
-    return text.strip()
-
-def classify_text(raw_text, model_name="electra-small", min_risk_tokens=3):
-    if not raw_text or not raw_text.strip():
-        return []
-
-    cleaned_text = clean_text_pipeline(raw_text)
-    model, tokenizer = load_model(model_name)
-    device = model.device
-
-    sentence_spans = list(PunktSentenceTokenizer().span_tokenize(cleaned_text))
-    highlighted_data = []
-    prev_end = 0
-
-    for start_idx, end_idx in sentence_spans:
-        if start_idx > prev_end:
-            highlighted_data.append((cleaned_text[prev_end:start_idx], None))
-
-        sentence = cleaned_text[start_idx:end_idx]
-        if not sentence.strip():
-            highlighted_data.append((sentence, None))
-            prev_end = end_idx
-            continue
-
-        if clean_boilerplate_header(sentence) or check_pro_user_override(sentence):
-            highlighted_data.append((sentence, None))
-            prev_end = end_idx
-            continue
-
-        inputs = tokenizer(
-            sentence,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512
-        )
-        tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            outputs = model(**inputs)
-
-        logits = outputs.logits[0]
-        probs = torch.softmax(logits, dim=-1)
-        predictions = torch.argmax(logits, dim=-1)
-
-        risk_tokens = []
-        for t_idx, pred in enumerate(predictions):
-            label = id2label[pred.item()]
-            token_str = tokens[t_idx]
-            if token_str in ('[CLS]', '[SEP]', '[PAD]'):
-                continue
-            prob = probs[t_idx][pred.item()].item()
-            if label in ('B-RISK', 'I-RISK'):
-                risk_tokens.append({"token": token_str, "prob": prob})
-
-        if len(risk_tokens) >= min_risk_tokens:
-            max_prob = max(t["prob"] for t in risk_tokens)
-            has_high_keyword = False
-            sentence_lower = sentence.lower()
-            for pattern in KEYWORDS_HIGH:
-                if re.search(pattern, sentence_lower):
-                    has_high_keyword = True
-                    break
-
-            keep = False
-            if has_high_keyword:
-                if max_prob >= 0.55:
-                    keep = True
-            else:
-                if max_prob >= 0.70:
-                    keep = True
-
-            if keep:
-                level = determine_risk_level(sentence, risk_tokens, has_high_keyword)
-                highlighted_data.append((sentence, level))
-            else:
-                highlighted_data.append((sentence, None))
-        else:
-            highlighted_data.append((sentence, None))
-
-        prev_end = end_idx
-
-    if prev_end < len(cleaned_text):
-        highlighted_data.append((cleaned_text[prev_end:], None))
-
-    return highlighted_data
-
-# Parse training history metrics
+# Parse training history metrics for the dashboard
 def load_metrics_df():
     import json
     rows = []
@@ -270,7 +27,7 @@ def load_metrics_df():
         path = os.path.join(BASE_DIR, "gotcha-extractor-model", f"{m}_metrics.json")
         if os.path.exists(path):
             try:
-                with open(path, "r") as f:
+                with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 
                 final_run = data.get("final_run", {})
@@ -289,7 +46,7 @@ def load_metrics_df():
                 print(f"Error reading metrics for {m}: {e}")
                 
     if not rows:
-        # Fallback dummy data if metrics JSON files are missing
+        # Fallback placeholder data if metrics JSON files are missing
         for m in models:
             for epoch in range(1, 11):
                 rows.append({
@@ -300,287 +57,866 @@ def load_metrics_df():
                 })
     return pd.DataFrame(rows)
 
+
 METRICS_DF = load_metrics_df()
+
+
+def categorize_gotcha(sentence: str) -> dict:
+    """Analyze the substantive legal risk of a flagged clause and assign editorial categorization."""
+    s_lower = sentence.lower()
+    if re.search(r"arbitrat|class\s+action|jury|court\s+proceeding|dispute", s_lower):
+        return {
+            "title": "FORCED ARBITRATION & LITIGATION BAN",
+            "docket": "SEC-ARB-01",
+            "badge": "CRITICAL RISK",
+            "badge_class": "badge-crimson",
+            "analysis": "Deprives the consumer of constitutional court access, trial by jury, and collective action remedies through mandatory confidential arbitration."
+        }
+    if re.search(r"sell|broker|market|advertis|third\s+part|location\s+data|usage\s+habit|telemetry", s_lower):
+        return {
+            "title": "SURVEILLANCE & DATA BROKERAGE",
+            "docket": "SEC-DAT-04",
+            "badge": "CRITICAL RISK",
+            "badge_class": "badge-crimson",
+            "analysis": "Authorizes monetization, commercial profiling, and syndication of user behavioral identifiers to unverified third-party brokers."
+        }
+    if re.search(r"modify|revise|update|without\s+notice|reserve\s+the\s+right\s+to|at\s+any\s+time", s_lower):
+        return {
+            "title": "UNILATERAL TERMS MUTATION",
+            "docket": "SEC-MUT-02",
+            "badge": "ADVERSE TERM",
+            "badge_class": "badge-amber",
+            "analysis": "Permits retroactive alteration of legal covenants without affirmative counterparty notification or re-negotiation rights."
+        }
+    if re.search(r"indemni|hold\s+harmless|defend|liabilit", s_lower):
+        return {
+            "title": "ASYMMETRIC INDEMNIFICATION SHIELD",
+            "docket": "SEC-IND-03",
+            "badge": "ADVERSE TERM",
+            "badge_class": "badge-amber",
+            "analysis": "Shifts corporate litigation fees, third-party damages, and corporate liabilities directly onto the individual user."
+        }
+    if re.search(r"no\s+warranty|as\s+is|cannot\s+(ensure|warrant|guarantee)", s_lower):
+        return {
+            "title": "BLANKET WARRANTY WAIVER ('AS-IS')",
+            "docket": "SEC-WAR-05",
+            "badge": "CAUTIONARY",
+            "badge_class": "badge-stone",
+            "analysis": "Disclaims all merchantability, fitness for purpose, and continuity of service, leaving counterparty without remedy."
+        }
+    return {
+        "title": "RESTRICTIVE LEGAL STIPULATION",
+        "docket": "SEC-GEN-00",
+        "badge": "CAUTIONARY",
+        "badge_class": "badge-stone",
+        "analysis": "Contractual asymmetry restricting ordinary consumer privileges, legal remedies, or data autonomy."
+    }
+
 
 # Single-model analysis handler
 def analyze_single(text, model_name, min_tokens):
     if not text or not text.strip():
-        return [], "<div style='text-align:center;color:#64748b;'>Enter text to start analysis.</div>", ""
+        placeholder_stats = """
+        <div class="telemetry-grid">
+            <div class="telemetry-cell">
+                <div class="cell-label">Critical Risks</div>
+                <div class="cell-value">—</div>
+                <div class="cell-desc">Arbitration & data syndication</div>
+            </div>
+            <div class="telemetry-cell">
+                <div class="cell-label">Adverse Covenants</div>
+                <div class="cell-value">—</div>
+                <div class="cell-desc">Silent modifications & tracking</div>
+            </div>
+            <div class="telemetry-cell">
+                <div class="cell-label">Cautionary Terms</div>
+                <div class="cell-value">—</div>
+                <div class="cell-desc">As-is warranty & liability disclaimers</div>
+            </div>
+            <div class="telemetry-cell">
+                <div class="cell-label">Inference Velocity</div>
+                <div class="cell-value">—</div>
+                <div class="cell-desc">Neural forward-pass runtime</div>
+            </div>
+        </div>
+        """
+        placeholder_dossier = """
+        <div class="dossier-empty">
+            <div class="empty-icon">§</div>
+            <div class="empty-title">Awaiting Legal Agreement Submission</div>
+            <div class="empty-sub">Paste contractual clauses into the console or select a historical docket above to execute forensic extraction.</div>
+        </div>
+        """
+        return [], placeholder_stats, placeholder_dossier
     
     start_time = time.time()
-    results = classify_text(text, model_name, min_tokens)
+    results = classify_text(text, model_name=model_name, min_risk_tokens=min_tokens)
     elapsed = (time.time() - start_time) * 1000
+    device_name = get_inference_device().type.upper()
     
     high_count = 0
     med_count = 0
     low_count = 0
-    breakdown_md = ""
+    flagged_cards = []
     
-    for text_seg, label in results:
+    for idx, (text_seg, label) in enumerate(results):
+        clean_seg = text_seg.strip()
+        if not clean_seg or label is None:
+            continue
+            
+        info = categorize_gotcha(clean_seg)
+        
         if label == "HIGH RISK":
             high_count += 1
-            breakdown_md += f"- 🔴 **[HIGH RISK]**: \"{text_seg.strip()}\"\n"
+            severity_badge = '<span class="dossier-badge badge-crimson">SEVERITY I // CRITICAL</span>'
         elif label == "MEDIUM RISK":
             med_count += 1
-            breakdown_md += f"- 🟠 **[MEDIUM RISK]**: \"{text_seg.strip()}\"\n"
-        elif label == "LOW RISK":
+            severity_badge = '<span class="dossier-badge badge-amber">SEVERITY II // ADVERSE</span>'
+        else:
             low_count += 1
-            breakdown_md += f"- 🟡 **[LOW RISK]**: \"{text_seg.strip()}\"\n"
+            severity_badge = '<span class="dossier-badge badge-stone">SEVERITY III // CAUTIONARY</span>'
             
+        card_html = f"""
+        <div class="dossier-card">
+            <div class="card-header-row">
+                <div class="docket-code">{info['docket']} · CLAUSE #{high_count + med_count + low_count:02d}</div>
+                <div class="docket-title">{info['title']}</div>
+                {severity_badge}
+            </div>
+            <div class="card-body-quote">
+                <span class="quote-mark">“</span>{clean_seg}<span class="quote-mark">”</span>
+            </div>
+            <div class="card-footer-analysis">
+                <span class="footer-label">LEGAL AUDIT:</span> {info['analysis']}
+            </div>
+        </div>
+        """
+        flagged_cards.append(card_html)
+        
+    device_badge = f"{device_name} ACCELERATED" if device_name == "CUDA" else "CPU ENGINE"
+    
     stats_html = f"""
-    <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
-        <div class="card-metric" style="flex: 1; min-width: 120px; border-left: 5px solid #ef4444;">
-            <div class="card-title">High Risk</div>
-            <div class="card-value">{high_count}</div>
-            <div class="card-info">Forced arbitration, class action waivers, location tracking.</div>
+    <div class="telemetry-grid">
+        <div class="telemetry-cell cell-crimson">
+            <div class="cell-label">Critical Threats</div>
+            <div class="cell-value">{high_count}</div>
+            <div class="cell-desc">Forced arbitration & data liquidation</div>
         </div>
-        <div class="card-metric" style="flex: 1; min-width: 120px; border-left: 5px solid #f97316;">
-            <div class="card-title">Medium Risk</div>
-            <div class="card-value">{med_count}</div>
-            <div class="card-info">Unilateral modifications, advertising trackers.</div>
+        <div class="telemetry-cell cell-amber">
+            <div class="cell-label">Adverse Covenants</div>
+            <div class="cell-value">{med_count}</div>
+            <div class="cell-desc">Unilateral changes & tracking trackers</div>
         </div>
-        <div class="card-metric" style="flex: 1; min-width: 120px; border-left: 5px solid #eab308;">
-            <div class="card-title">Low Risk</div>
-            <div class="card-value">{low_count}</div>
-            <div class="card-info">Broad warranty disclaimers, standard liabilities.</div>
+        <div class="telemetry-cell cell-stone">
+            <div class="cell-label">Cautionary Terms</div>
+            <div class="cell-value">{low_count}</div>
+            <div class="cell-desc">Broad disclaimers & liability shifts</div>
         </div>
-        <div class="card-metric" style="flex: 1; min-width: 120px; border-left: 5px solid #3b82f6;">
-            <div class="card-title">Latency</div>
-            <div class="card-value">{elapsed:.1f}ms</div>
-            <div class="card-info">Execution time on CPU.</div>
+        <div class="telemetry-cell cell-cyan">
+            <div class="cell-label">Inference Velocity</div>
+            <div class="cell-value">{elapsed:.1f}<span class="unit">ms</span></div>
+            <div class="cell-desc">{device_badge}</div>
         </div>
     </div>
     """
     
-    if not breakdown_md:
-        breakdown_md = "*No risky clauses detected. This agreement looks standard!*"
+    if flagged_cards:
+        dossier_html = f"""
+        <div class="dossier-container">
+            <div class="dossier-header-bar">
+                <span class="dossier-title">DISCRIMINATOR FINDINGS ({len(flagged_cards)} DETECTED CLAUSES)</span>
+                <span class="dossier-meta">MODEL: {model_name.upper()} // TOK-THRES: {min_tokens}</span>
+            </div>
+            {''.join(flagged_cards)}
+        </div>
+        """
+    else:
+        dossier_html = """
+        <div class="dossier-clear">
+            <div class="clear-icon">✓</div>
+            <div class="clear-title">AUDIT PASSED // NO ADVERSE GOTCHAS DETECTED</div>
+            <div class="clear-desc">The examined clauses do not exhibit standard mandatory arbitration, unilateral modification, or data liquidation markers at the selected sensitivity threshold.</div>
+        </div>
+        """
         
-    return results, stats_html, breakdown_md
+    return results, stats_html, dossier_html
+
 
 # Multi-model comparison handler
 def compare_models(text, min_tokens):
-    if not text or not text.strip():
-        return [], [], [], [], pd.DataFrame()
-    
-    res_electra = classify_text(text, "electra-small", min_tokens)
-    res_tinybert = classify_text(text, "tinybert", min_tokens)
-    res_mini = classify_text(text, "bert-mini", min_tokens)
-    res_tiny = classify_text(text, "bert-tiny", min_tokens)
-    
-    comparison_rows = []
-    for m in AVAILABLE_MODELS:
-        start_time = time.time()
-        results = classify_text(text, m, min_tokens)
-        elapsed = (time.time() - start_time) * 1000
-        
-        risky_count = sum(1 for _, label in results if label is not None)
-        meta = MODEL_META[m]
-        
-        comparison_rows.append({
-            "Model": meta["name"],
-            "Validation F1 (Best)": meta["best_f1"],
-            "Parameters": meta["params"],
-            "Disk Size": meta["size"],
-            "Risks Detected": risky_count,
-            "Latency (ms)": f"{elapsed:.1f} ms"
-        })
-        
-    df_compare = pd.DataFrame(comparison_rows)
-    return res_electra, res_tinybert, res_mini, res_tiny, df_compare
+    return gotcha_compare_models(text, min_tokens=min_tokens)
 
-# Preset Examples
+
+# Distinctive Real-World Legal Covenants
+PRESET_CASES = {
+    "case_arbitration": (
+        "Welcome to the platform. By continuing to use our services, you expressly agree that any and all disputes, "
+        "claims, or controversies arising out of or relating to these Terms shall be resolved exclusively by confidential, "
+        "binding arbitration administered by the American Arbitration Association, and you expressly waive any right to a "
+        "trial by jury or to participate in a class action lawsuit or class-wide arbitration."
+    ),
+    "case_surveillance": (
+        "We reserve the right to collect, synthesize, and monetize your precise geographic coordinates, device identifiers, "
+        "and browsing habits, and to syndicate such behavioral telemetry to commercial third parties, ad networks, and data "
+        "brokers for targeted advertising and market research without further notice to you."
+    ),
+    "case_modification": (
+        "We reserve the right, at our sole and absolute discretion, to modify, amend, replace, or update these Terms of Service "
+        "at any time without prior notice. Your continued access to or use of the service following the posting of any modifications "
+        "constitutes binding and irrevocable acceptance of the revised covenants."
+    ),
+    "case_indemnity": (
+        "You agree to defend, indemnify, and hold harmless the Company, its subsidiaries, affiliates, officers, and directors "
+        "from and against any and all claims, liabilities, damages, losses, expenses, and reasonable attorneys' fees arising "
+        "out of or in any way connected with your access to or use of the Services, including any claims resulting from our own negligence."
+    )
+}
+
 EXAMPLES = [
-    [
-        "Welcome to the platform. By continuing, you agree to forced arbitration in the event of a dispute. We also reserve the right to sell your location data and usage habits to unverified third parties.",
-        "electra-small",
-        3
-    ],
-    [
-        "You agree to defend, indemnify and hold harmless the Company and its officers from and against any claims, liabilities, damages, losses, and expenses.",
-        "electra-small",
-        3
-    ],
-    [
-        "We may modify these terms at any time without notice. Your continued use of the service constitutes acceptance of the new terms.",
-        "electra-small",
-        3
-    ]
+    [PRESET_CASES["case_arbitration"], "electra-small", 3],
+    [PRESET_CASES["case_surveillance"], "electra-small", 3],
+    [PRESET_CASES["case_modification"], "electra-small", 3],
+    [PRESET_CASES["case_indemnity"], "electra-small", 3],
 ]
 
-# Custom CSS
 CUSTOM_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+:root {
+  --bg-deep: #090a0c;
+  --bg-surface: #111317;
+  --bg-card: #16181f;
+  --bg-card-hover: #1c1f28;
+  --bg-inset: #0c0d11;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-accent: #c5a059;
+  --border-gold-glow: rgba(197, 160, 89, 0.25);
+  --ink-primary: #f5f2eb;
+  --ink-secondary: #9da5b3;
+  --ink-muted: #646c7a;
+  --ink-faint: #3e4450;
+  --accent-crimson: #be123c;
+  --accent-crimson-bg: rgba(190, 18, 60, 0.12);
+  --accent-crimson-border: rgba(190, 18, 60, 0.4);
+  --accent-amber: #b45309;
+  --accent-amber-bg: rgba(180, 83, 9, 0.12);
+  --accent-amber-border: rgba(180, 83, 9, 0.4);
+  --accent-stone: #64748b;
+  --accent-stone-bg: rgba(100, 116, 139, 0.12);
+  --accent-stone-border: rgba(100, 116, 139, 0.35);
+  --accent-cyan: #38bdf8;
+  --accent-gold: #c5a059;
+  --font-display: 'Newsreader', Georgia, serif;
+  --font-title: 'Cinzel', serif;
+  --font-ui: 'Space Grotesk', -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
 
 body, .gradio-container {
-    font-family: 'Outfit', sans-serif !important;
+  background-color: var(--bg-deep) !important;
+  background-image: 
+    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.035) 1px, transparent 0),
+    radial-gradient(ellipse 60% 350px at 50% 0%, rgba(197, 160, 89, 0.045), transparent) !important;
+  background-size: 24px 24px, 100% 100% !important;
+  color: var(--ink-primary) !important;
+  font-family: var(--font-ui) !important;
+  max-width: 1420px !important;
+  margin: 0 auto !important;
 }
 
-.header-container {
-    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-    color: white;
-    padding: 2.5rem;
-    border-radius: 12px;
-    margin-bottom: 2rem;
-    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-    text-align: center;
+/* Masthead Header */
+.forensic-masthead {
+  border-top: 2px solid var(--border-accent);
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 2.25rem 1.5rem 1.75rem 1.5rem;
+  margin-bottom: 1.75rem;
+  background: linear-gradient(180deg, rgba(22, 24, 31, 0.6) 0%, rgba(10, 11, 14, 0.8) 100%);
+  position: relative;
 }
 
-.header-container h1 {
-    font-size: 2.5rem;
-    font-weight: 700;
-    margin-bottom: 0.5rem;
-    background: linear-gradient(to right, #38bdf8, #818cf8);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+.forensic-masthead::before {
+  content: "§ 2026.IV ARCHIVE";
+  position: absolute;
+  top: 0.75rem;
+  right: 1.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.18em;
+  color: var(--ink-muted);
 }
 
-.header-container p {
-    font-size: 1.1rem;
-    color: #cbd5e1;
-    max-width: 800px;
-    margin: 0 auto;
+.masthead-top-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
-.card-metric {
-    background: #f8fafc;
-    border: 1px solid #e2e8f0;
-    border-radius: 8px;
-    padding: 1.25rem;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+.masthead-docket {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.15em;
+  color: var(--accent-gold);
+  text-transform: uppercase;
 }
 
-.card-title {
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: #64748b;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-bottom: 0.25rem;
+.beacon-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.08);
+  padding: 0.2rem 0.65rem;
+  border-radius: 9999px;
+  border: 1px solid rgba(16, 185, 129, 0.25);
 }
 
-.card-value {
-    font-size: 1.75rem;
-    font-weight: 700;
-    color: #0f172a;
+.beacon-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 6px #10b981;
 }
 
-.card-info {
-    font-size: 0.8rem;
-    color: #94a3b8;
-    margin-top: 0.25rem;
+.masthead-title {
+  font-family: var(--font-display);
+  font-size: 3.1rem;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+  line-height: 1.1;
+  color: var(--ink-primary);
+  margin: 0.25rem 0 0.75rem 0;
 }
 
-.model-card {
-    border: 1px solid #e2e8f0;
-    border-radius: 12px;
-    padding: 1.5rem;
-    background: #ffffff;
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-    transition: transform 0.2s, box-shadow 0.2s;
+.masthead-title em {
+  font-style: italic;
+  color: #e2c275;
+  font-weight: 400;
 }
 
-.model-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);
+.masthead-sub {
+  font-family: var(--font-ui);
+  font-size: 1.05rem;
+  font-weight: 400;
+  color: var(--ink-secondary);
+  max-width: 860px;
+  line-height: 1.55;
+  margin: 0;
 }
 
-.model-badge {
-    display: inline-block;
-    padding: 0.25rem 0.75rem;
-    font-size: 0.8rem;
-    font-weight: 600;
-    border-radius: 9999px;
-    margin-bottom: 0.75rem;
+/* Quick Docket Ribbon */
+.docket-shelf {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.5rem;
+  align-items: center;
 }
 
-.badge-electra { background: #e0f2fe; color: #0369a1; }
-.badge-tinybert { background: #fef3c7; color: #d97706; }
-.badge-mini { background: #f3e8ff; color: #7e22ce; }
-.badge-tiny { background: #dcfce7; color: #15803d; }
+.shelf-label {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin-right: 0.25rem;
+}
+
+/* Telemetry Metrics */
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.85rem;
+  margin-bottom: 1.25rem;
+}
+
+@media (max-width: 900px) {
+  .telemetry-grid { grid-template-columns: repeat(2, 1fr); }
+  .masthead-title { font-size: 2.2rem; }
+}
+
+.telemetry-cell {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 1.1rem 1.25rem;
+  position: relative;
+  transition: border-color 0.2s ease;
+}
+
+.telemetry-cell:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.cell-crimson { border-top: 3px solid var(--accent-crimson); }
+.cell-amber { border-top: 3px solid var(--accent-amber); }
+.cell-stone { border-top: 3px solid var(--accent-stone); }
+.cell-cyan { border-top: 3px solid var(--accent-cyan); }
+
+.cell-label {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin-bottom: 0.35rem;
+}
+
+.cell-value {
+  font-family: var(--font-display);
+  font-size: 2.4rem;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--ink-primary);
+  margin-bottom: 0.35rem;
+}
+
+.cell-value .unit {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--ink-muted);
+  margin-left: 0.25rem;
+  font-weight: 400;
+}
+
+.cell-desc {
+  font-family: var(--font-ui);
+  font-size: 0.78rem;
+  color: var(--ink-secondary);
+}
+
+/* Dossier Finding Cards */
+.dossier-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  margin-top: 1rem;
+}
+
+.dossier-header-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  color: var(--ink-muted);
+}
+
+.dossier-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--border-accent);
+  border-radius: 4px;
+  padding: 1.25rem;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.dossier-card:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-gold-glow);
+  transform: translateX(2px);
+}
+
+.card-header-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.docket-code {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  color: var(--accent-gold);
+  background: rgba(197, 160, 89, 0.1);
+  padding: 0.15rem 0.5rem;
+  border-radius: 3px;
+}
+
+.docket-title {
+  font-family: var(--font-ui);
+  font-size: 0.88rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink-primary);
+  flex: 1;
+}
+
+.dossier-badge {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  padding: 0.2rem 0.6rem;
+  border-radius: 9999px;
+  text-transform: uppercase;
+}
+
+.badge-crimson {
+  background: var(--accent-crimson-bg);
+  color: #fda4af;
+  border: 1px solid var(--accent-crimson-border);
+}
+
+.badge-amber {
+  background: var(--accent-amber-bg);
+  color: #fcd34d;
+  border: 1px solid var(--accent-amber-border);
+}
+
+.badge-stone {
+  background: var(--accent-stone-bg);
+  color: #cbd5e1;
+  border: 1px solid var(--accent-stone-border);
+}
+
+.card-body-quote {
+  font-family: var(--font-display);
+  font-size: 1.12rem;
+  line-height: 1.5;
+  color: #f5f2eb;
+  padding: 0.75rem 1rem;
+  background: var(--bg-inset);
+  border-left: 2px solid rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+  margin-bottom: 0.75rem;
+}
+
+.quote-mark {
+  color: var(--accent-gold);
+  font-family: Georgia, serif;
+  font-size: 1.3rem;
+  line-height: 0;
+}
+
+.card-footer-analysis {
+  font-family: var(--font-ui);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--ink-secondary);
+}
+
+.footer-label {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  color: var(--accent-gold);
+  font-weight: 600;
+}
+
+/* Empty State / Audit Clear */
+.dossier-empty, .dossier-clear {
+  padding: 3.5rem 2rem;
+  text-align: center;
+  background: var(--bg-surface);
+  border: 1px dashed var(--border-subtle);
+  border-radius: 6px;
+}
+
+.empty-icon {
+  font-family: var(--font-display);
+  font-size: 3rem;
+  color: var(--accent-gold);
+  margin-bottom: 0.75rem;
+  opacity: 0.6;
+}
+
+.empty-title, .clear-title {
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  font-weight: 600;
+  color: var(--ink-primary);
+  margin-bottom: 0.4rem;
+}
+
+.empty-sub, .clear-desc {
+  font-family: var(--font-ui);
+  font-size: 0.9rem;
+  color: var(--ink-secondary);
+  max-width: 540px;
+  margin: 0 auto;
+  line-height: 1.5;
+}
+
+.clear-icon {
+  font-size: 2.2rem;
+  color: #10b981;
+  margin-bottom: 0.5rem;
+}
+
+/* Button Refinement */
+.audit-execute-btn {
+  background: linear-gradient(180deg, #1c1f26 0%, #12141a 100%) !important;
+  color: #f5f2eb !important;
+  border: 1px solid var(--border-accent) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 0.85rem !important;
+  letter-spacing: 0.12em !important;
+  text-transform: uppercase !important;
+  padding: 0.85rem 1.5rem !important;
+  border-radius: 4px !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+
+.audit-execute-btn:hover {
+  background: linear-gradient(180deg, #242730 0%, #171920 100%) !important;
+  border-color: #e2c275 !important;
+  box-shadow: 0 0 16px rgba(197, 160, 89, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+  transform: translateY(-1px) !important;
+}
+
+.preset-chip-btn {
+  background: var(--bg-surface) !important;
+  color: var(--ink-secondary) !important;
+  border: 1px solid var(--border-subtle) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 0.72rem !important;
+  letter-spacing: 0.08em !important;
+  padding: 0.4rem 0.85rem !important;
+  border-radius: 3px !important;
+  transition: all 0.15s ease !important;
+}
+
+.preset-chip-btn:hover {
+  color: var(--ink-primary) !important;
+  border-color: var(--border-accent) !important;
+  background: var(--bg-card) !important;
+}
+
+/* Gradio Component Reskinning */
+.gr-textbox textarea, .gr-textbox input {
+  background-color: var(--bg-surface) !important;
+  color: var(--ink-primary) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 0.88rem !important;
+  line-height: 1.6 !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 4px !important;
+}
+
+.gr-textbox textarea:focus, .gr-textbox input:focus {
+  border-color: var(--border-accent) !important;
+  box-shadow: 0 0 0 1px var(--border-accent) !important;
+}
+
+.gr-dropdown {
+  background-color: var(--bg-surface) !important;
+  border-radius: 4px !important;
+}
+
+.gr-tabs {
+  border-bottom: 1px solid var(--border-subtle) !important;
+  margin-bottom: 1.5rem !important;
+}
+
+.gr-tab-nav button {
+  font-family: var(--font-mono) !important;
+  font-size: 0.8rem !important;
+  letter-spacing: 0.1em !important;
+  text-transform: uppercase !important;
+  color: var(--ink-muted) !important;
+  padding: 0.75rem 1.25rem !important;
+  border-bottom: 2px solid transparent !important;
+}
+
+.gr-tab-nav button.selected {
+  color: var(--ink-primary) !important;
+  border-bottom-color: var(--border-accent) !important;
+}
+
+/* HighlightedText Typography */
+.highlighted-text {
+  font-family: var(--font-display) !important;
+  font-size: 1.15rem !important;
+  line-height: 1.75 !important;
+  background: var(--bg-surface) !important;
+  padding: 1.25rem !important;
+  border-radius: 4px !important;
+  border: 1px solid var(--border-subtle) !important;
+}
+
+.highlighted-text span[style*="background"] {
+  border-radius: 3px !important;
+  padding: 0.15rem 0.4rem !important;
+  font-weight: 500 !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3) !important;
+}
+
+/* Comparison Badges */
+.model-spec-badge {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.35rem 0.85rem;
+  border-radius: 3px;
+  display: inline-block;
+  margin-bottom: 0.65rem;
+  border: 1px solid var(--border-subtle);
+}
+
+.spec-electra { background: rgba(56, 189, 248, 0.12); color: #7dd3fc; border-color: rgba(56, 189, 248, 0.3); }
+.spec-tinybert { background: rgba(197, 160, 89, 0.12); color: #e2c275; border-color: rgba(197, 160, 89, 0.3); }
+.spec-mini { background: rgba(168, 85, 247, 0.12); color: #c084fc; border-color: rgba(168, 85, 247, 0.3); }
+.spec-tiny { background: rgba(16, 185, 129, 0.12); color: #6ee7b7; border-color: rgba(16, 185, 129, 0.3); }
 """
 
-# Color map for HighlightedText output
-COLOR_MAP = {
-    "HIGH RISK": "#ef4444",
-    "MEDIUM RISK": "#f97316",
-    "LOW RISK": "#eab308"
-}
+# Version-adaptive Blocks instantiation
+gr_version_str = getattr(gr, "__version__", "4.0.0")
+gr_major = int(gr_version_str.split(".")[0]) if gr_version_str and gr_version_str[0].isdigit() else 4
 
-with gr.Blocks(css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
+if gr_major >= 6:
+    blocks_kwargs = {}
+    launch_kwargs = {"theme": gr.themes.Base(), "css": CUSTOM_CSS}
+else:
+    blocks_kwargs = {"theme": gr.themes.Base(), "css": CUSTOM_CSS}
+    launch_kwargs = {}
+
+with gr.Blocks(**blocks_kwargs) as demo:
     
-    # Custom Gradient Header
+    # Injected style fallback ensures styling in all Gradio versions & embeds
+    gr.HTML(f"<style>{CUSTOM_CSS}</style>", visible=False)
+    
+    # Architectural Masthead
     gr.HTML("""
-    <div class="header-container">
-        <h1>ToS 'Gotcha' Clause Extractor</h1>
-        <p>Analyze legal terms and privacy policies instantly using four fine-tuned language models. Compare model capabilities side-by-side to understand accuracy and latency trade-offs.</p>
+    <div class="forensic-masthead">
+        <div class="masthead-top-bar">
+            <div class="masthead-docket">DOCKET 2026.IV // SPEC: BIO-TAG SEQUENCE DISCRIMINATOR</div>
+            <div class="beacon-status">
+                <span class="beacon-dot"></span>
+                <span>DISCRIMINATOR ARMED & OPERATIONAL</span>
+            </div>
+        </div>
+        <h1 class="masthead-title">The Toxic Fine Print <em>Inspector</em></h1>
+        <p class="masthead-sub">Forensic NLP sequence labeling for adhesion contracts. Dissecting forced arbitration, surveillance telemetry brokerage, unilateral amendment covenants, and asymmetric liability shields in consumer Terms of Service.</p>
     </div>
     """)
     
     with gr.Tabs():
         
-        # TAB 1: Single Model Classifier
-        with gr.TabItem("🔍 Single Model Extractor"):
+        # TAB 1: Single Model Forensic Extractor
+        with gr.TabItem("§ Forensic Clause Inspector"):
+            
+            # Quick Docket Shelf (Preset cases)
             with gr.Row():
-                with gr.Column(scale=4):
+                with gr.Column(scale=12):
+                    gr.HTML('<div class="docket-shelf"><span class="shelf-label">HISTORICAL DOCKET PRESETS:</span></div>')
+                    with gr.Row():
+                        btn_case_arb = gr.Button("Case I · Forced Arbitration", size="sm", elem_classes=["preset-chip-btn"])
+                        btn_case_surv = gr.Button("Case II · Surveillance Brokerage", size="sm", elem_classes=["preset-chip-btn"])
+                        btn_case_mut = gr.Button("Case III · Unilateral Mutation", size="sm", elem_classes=["preset-chip-btn"])
+                        btn_case_ind = gr.Button("Case IV · Indemnification Shield", size="sm", elem_classes=["preset-chip-btn"])
+            
+            with gr.Row():
+                with gr.Column(scale=5):
                     text_input = gr.Textbox(
-                        lines=10,
-                        label="Terms of Service or Privacy Policy text",
-                        placeholder="Paste legal agreement clauses, privacy policy paragraphs, or user agreements here..."
+                        lines=12,
+                        label="Contractual Text Intake (Terms of Service / Privacy Policy)",
+                        placeholder="Paste contractual clauses, privacy policy declarations, or user agreement sections here...",
+                        value=PRESET_CASES["case_arbitration"]
                     )
                     with gr.Row():
                         model_dropdown = gr.Dropdown(
                             choices=AVAILABLE_MODELS,
                             value="electra-small",
-                            label="Select Extraction Model"
+                            label="Neural Architecture",
+                            info="Select fine-tuned transformer discriminator"
                         )
                         min_tokens_slider = gr.Slider(
                             minimum=1,
                             maximum=5,
                             step=1,
                             value=3,
-                            label="Min Risk Tokens in Sentence"
+                            label="Risk Token Sensitivity Threshold",
+                            info="Minimum risk sub-words to trip clause flag"
                         )
-                    analyze_btn = gr.Button("Analyze Clauses", variant="primary")
+                    analyze_btn = gr.Button("[ EXECUTE FORENSIC AUDIT ➔ ]", variant="primary", elem_classes=["audit-execute-btn"])
                     
-                with gr.Column(scale=5):
-                    gr.Markdown("### Risk Assessment & Latency")
-                    stats_output = gr.HTML("<div style='text-align:center;color:#64748b;'>Enter text and click 'Analyze Clauses' to see results.</div>")
+                with gr.Column(scale=7):
+                    stats_output = gr.HTML("""
+                    <div class="telemetry-grid">
+                        <div class="telemetry-cell cell-crimson">
+                            <div class="cell-label">Critical Threats</div>
+                            <div class="cell-value">—</div>
+                            <div class="cell-desc">Arbitration & data syndication</div>
+                        </div>
+                        <div class="telemetry-cell cell-amber">
+                            <div class="cell-label">Adverse Covenants</div>
+                            <div class="cell-value">—</div>
+                            <div class="cell-desc">Silent modifications & tracking</div>
+                        </div>
+                        <div class="telemetry-cell cell-stone">
+                            <div class="cell-label">Cautionary Terms</div>
+                            <div class="cell-value">—</div>
+                            <div class="cell-desc">As-is warranty & liability disclaimers</div>
+                        </div>
+                        <div class="telemetry-cell cell-cyan">
+                            <div class="cell-label">Inference Velocity</div>
+                            <div class="cell-value">—</div>
+                            <div class="cell-desc">Neural forward-pass runtime</div>
+                        </div>
+                    </div>
+                    """)
                     
                     highlighted_output = gr.HighlightedText(
-                        label="Analysis Results (Highlighted Clauses)",
+                        label="Annotated Legal Agreement",
                         combine_adjacent=False,
-                        color_map=COLOR_MAP
+                        color_map=COLOR_MAP,
+                        elem_classes=["highlighted-text"]
                     )
                     
-                    with gr.Accordion("🔍 Detailed Risky Clause Breakdown", open=True):
-                        breakdown_output = gr.Markdown("*Detailed breakdown will appear here...*")
+                    dossier_output = gr.HTML("""
+                    <div class="dossier-empty">
+                        <div class="empty-icon">§</div>
+                        <div class="empty-title">Ready for Forensic Audit</div>
+                        <div class="empty-sub">Click '[ EXECUTE FORENSIC AUDIT ➔ ]' to run neural token discrimination across the submitted agreement.</div>
+                    </div>
+                    """)
+            
+            # Wire up preset buttons
+            btn_case_arb.click(fn=lambda: PRESET_CASES["case_arbitration"], outputs=text_input)
+            btn_case_surv.click(fn=lambda: PRESET_CASES["case_surveillance"], outputs=text_input)
+            btn_case_mut.click(fn=lambda: PRESET_CASES["case_modification"], outputs=text_input)
+            btn_case_ind.click(fn=lambda: PRESET_CASES["case_indemnity"], outputs=text_input)
             
             # Wire up single analyzer
             analyze_btn.click(
                 fn=analyze_single,
                 inputs=[text_input, model_dropdown, min_tokens_slider],
-                outputs=[highlighted_output, stats_output, breakdown_output]
-            )
-            
-            # Examples
-            gr.Examples(
-                examples=EXAMPLES,
-                inputs=[text_input, model_dropdown, min_tokens_slider],
-                outputs=[highlighted_output, stats_output, breakdown_output],
-                fn=analyze_single,
-                cache_examples=False
+                outputs=[highlighted_output, stats_output, dossier_output]
             )
 
-        # TAB 2: Side-by-Side Model Comparison
-        with gr.TabItem("📊 Compare Models Side-by-Side"):
-            gr.Markdown("Compare how all four fine-tuned models identify risks and measure their inference latencies.")
+        # TAB 2: Comparative Architecture Benchmarking
+        with gr.TabItem("⚖ Comparative Model Matrix"):
+            gr.HTML("""
+            <div style="margin-bottom: 1.25rem;">
+                <div style="font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.12em; color: var(--accent-gold); margin-bottom: 0.35rem;">
+                    CROSS-MODEL VERIFICATION PROTOCOL
+                </div>
+                <div style="font-family: var(--font-ui); font-size: 0.95rem; color: var(--ink-secondary);">
+                    Run identical legal covenants through all four fine-tuned backbones in a single pass to contrast sensitivity thresholds and inference latencies.
+                </div>
+            </div>
+            """)
             
             with gr.Row():
                 comp_text_input = gr.Textbox(
-                    lines=5,
-                    label="Enter clauses to compare",
+                    lines=4,
+                    label="Contractual Covenants for Comparative Discrimination",
                     value="We reserve the right to modify these terms at any time without notice. In the event of a dispute, you waive your right to a class action lawsuit and agree to binding arbitration.",
-                    placeholder="Enter legal sentences to test..."
+                    placeholder="Enter clauses to benchmark across all four models..."
                 )
             
             with gr.Row():
@@ -589,33 +925,33 @@ with gr.Blocks(css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
                     maximum=5,
                     step=1,
                     value=3,
-                    label="Min Risk Tokens"
+                    label="Min Risk Token Threshold"
                 )
-                compare_btn = gr.Button("Compare All Models", variant="primary")
+                compare_btn = gr.Button("[ RUN CROSS-ARCHITECTURE BENCHMARK ➔ ]", variant="primary", elem_classes=["audit-execute-btn"])
                 
-            gr.Markdown("### Highlighting Comparison")
+            gr.HTML("<div style='font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.12em; color: var(--ink-muted); margin: 1.5rem 0 0.75rem 0;'>ANNOTATION OUTPUT COMPARISON</div>")
             
             with gr.Row():
                 with gr.Column():
-                    gr.HTML("<div class='model-badge badge-electra'>ELECTRA-Small (Best Accuracy)</div>")
-                    out_electra = gr.HighlightedText(label="ELECTRA-Small Output", combine_adjacent=False, color_map=COLOR_MAP)
+                    gr.HTML("<div class='model-spec-badge spec-electra'>ELECTRA-Small (Discriminator · 13.5M)</div>")
+                    out_electra = gr.HighlightedText(label="ELECTRA Output", combine_adjacent=False, color_map=COLOR_MAP, elem_classes=["highlighted-text"])
                 with gr.Column():
-                    gr.HTML("<div class='model-badge badge-tinybert'>TinyBERT</div>")
-                    out_tinybert = gr.HighlightedText(label="TinyBERT Output", combine_adjacent=False, color_map=COLOR_MAP)
+                    gr.HTML("<div class='model-spec-badge spec-tinybert'>TinyBERT (4-Layer Distilled · 14.3M)</div>")
+                    out_tinybert = gr.HighlightedText(label="TinyBERT Output", combine_adjacent=False, color_map=COLOR_MAP, elem_classes=["highlighted-text"])
                     
             with gr.Row():
                 with gr.Column():
-                    gr.HTML("<div class='model-badge badge-mini'>BERT-Mini</div>")
-                    out_mini = gr.HighlightedText(label="BERT-Mini Output", combine_adjacent=False, color_map=COLOR_MAP)
+                    gr.HTML("<div class='model-spec-badge spec-mini'>BERT-Mini (4-Layer 256D · 11.1M)</div>")
+                    out_mini = gr.HighlightedText(label="BERT-Mini Output", combine_adjacent=False, color_map=COLOR_MAP, elem_classes=["highlighted-text"])
                 with gr.Column():
-                    gr.HTML("<div class='model-badge badge-tiny'>BERT-Tiny</div>")
-                    out_tiny = gr.HighlightedText(label="BERT-Tiny Output", combine_adjacent=False, color_map=COLOR_MAP)
+                    gr.HTML("<div class='model-spec-badge spec-tiny'>BERT-Tiny (2-Layer 128D · 4.4M)</div>")
+                    out_tiny = gr.HighlightedText(label="BERT-Tiny Output", combine_adjacent=False, color_map=COLOR_MAP, elem_classes=["highlighted-text"])
             
-            gr.Markdown("### Performance Summary")
+            gr.HTML("<div style='font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.12em; color: var(--ink-muted); margin: 1.5rem 0 0.75rem 0;'>PERFORMANCE TELEMETRY MATRIX</div>")
             comparison_df = gr.Dataframe(
                 headers=["Model", "Validation F1 (Best)", "Parameters", "Disk Size", "Risks Detected", "Latency (ms)"],
                 datatype=["str", "str", "str", "str", "number", "str"],
-                label="Metrics Comparison Table"
+                label="Benchmark Metrics Ledger"
             )
             
             compare_btn.click(
@@ -624,9 +960,18 @@ with gr.Blocks(css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
                 outputs=[out_electra, out_tinybert, out_mini, out_tiny, comparison_df]
             )
 
-        # TAB 3: Metrics Dashboard & History
-        with gr.TabItem("📈 Performance & Training Dashboard"):
-            gr.Markdown("### Evaluation Leaderboard")
+        # TAB 3: Model Training History & Architecture
+        with gr.TabItem("📊 Technical Ledger & Evaluation"):
+            gr.HTML("""
+            <div style="margin-bottom: 1.25rem;">
+                <div style="font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.12em; color: var(--accent-gold); margin-bottom: 0.35rem;">
+                    MODEL ARCHITECTURE EVALUATION LEDGER
+                </div>
+                <div style="font-family: var(--font-ui); font-size: 0.95rem; color: var(--ink-secondary);">
+                    Validation histories across hyperparameter optimization trials (Optuna) and inverse-sqrt class-weighted loss training.
+                </div>
+            </div>
+            """)
             
             leaderboard_rows = []
             for m in AVAILABLE_MODELS:
@@ -641,12 +986,10 @@ with gr.Blocks(css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
                 
             gr.Dataframe(
                 value=leaderboard_rows,
-                headers=["Model Name", "Best Validation F1", "Parameter Count", "File Size", "Model Profile"],
+                headers=["Architecture", "Validation F1", "Parameters", "Footprint", "Design Rationale"],
                 datatype=["str", "str", "str", "str", "str"],
                 interactive=False
             )
-            
-            gr.Markdown("### Training Histories (Comparison)")
             
             with gr.Row():
                 f1_plot = gr.LinePlot(
@@ -654,7 +997,7 @@ with gr.Blocks(css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
                     x="Epoch",
                     y="Validation F1",
                     color="Model",
-                    title="Validation F1 Score vs. Training Epochs",
+                    title="Validation F1 Progression vs. Epochs",
                     tooltip=["Model", "Epoch", "Validation F1"]
                 )
                 
@@ -663,16 +1006,22 @@ with gr.Blocks(css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
                     x="Epoch",
                     y="Training Loss",
                     color="Model",
-                    title="Training Loss vs. Training Epochs",
+                    title="Weighted Cross-Entropy Loss vs. Epochs",
                     tooltip=["Model", "Epoch", "Training Loss"]
                 )
                 
-            gr.Markdown("""
-            ### Technical Training Notes
-            - **Dataset**: Fine-tuned on a sequence classification dataset annotated for "Gotcha" clauses (Arbitration, class actions, locations, unilateral updates).
-            - **Sequence Tagging**: Models categorize each token as `B-RISK` (beginning of risk), `I-RISK` (inside risk), or `O` (outside risk).
-            - **Post-Processing**: Sentences are evaluated for risk density based on token count and keywords to filter out general legal boilerplate.
+            gr.HTML("""
+            <div style="background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1.5rem; margin-top: 1rem;">
+                <div style="font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.15em; color: var(--accent-gold); margin-bottom: 0.5rem;">
+                    FORENSIC ARCHITECTURE NOTES
+                </div>
+                <div style="font-family: var(--font-ui); font-size: 0.88rem; line-height: 1.6; color: var(--ink-secondary);">
+                    <p>• <strong>Token Classification Protocol:</strong> Models classify sub-words into <code>B-RISK</code>, <code>I-RISK</code>, and <code>O</code> tags using an inverse-sqrt class-weighted cross-entropy loss (<code>[0.38, 4.70, 1.00]</code>), preventing minority gotcha boundaries from being submerged by neutral background text.</p>
+                    <p>• <strong>Symmetric Context Augmentation:</strong> Prevents artificial positional priors by balancing gotcha placement across sequence boundaries (40% prefix, 40% suffix, 20% embedded).</p>
+                    <p>• <strong>Heuristic Interception:</strong> Pro-user consumer rights (GDPR/CCPA access, erasure, deletion) are safeguarded from false alarms via contextual negation analysis.</p>
+                </div>
+            </div>
             """)
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    demo.launch(server_name="0.0.0.0", server_port=7860, **launch_kwargs)
