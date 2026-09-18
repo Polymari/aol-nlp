@@ -20,33 +20,33 @@ MODEL_META = {
         "name": "ELECTRA-Small (Fine-tuned)",
         "params": "13.5M",
         "size": "51.5 MB",
-        "desc": "Best overall accuracy and F1 score. Balanced size and high reliability.",
+        "desc": "Top overall accuracy & F1 score (79.7%). Excellent balance of 13.5M parameters and 88.0% recall on high-risk clauses.",
         "badge_class": "badge-electra",
-        "best_f1": "47.3%"
+        "best_f1": "79.7%"
     },
     "tinybert": {
         "name": "TinyBERT (Fine-tuned)",
         "params": "14.3M",
         "size": "54.4 MB",
-        "desc": "Standard compressed BERT model. Moderately accurate but slower than ELECTRA.",
+        "desc": "Distilled BERT architecture achieving 77.6% F1 and 87.9% recall with balanced inference latency.",
         "badge_class": "badge-tinybert",
-        "best_f1": "23.4%"
-    },
-    "bert-mini": {
-        "name": "BERT-Mini (Fine-tuned)",
-        "params": "11.1M",
-        "size": "42.4 MB",
-        "desc": "Lightweight BERT variant. Fast execution with reasonable accuracy.",
-        "badge_class": "badge-mini",
-        "best_f1": "21.2%"
+        "best_f1": "77.6%"
     },
     "bert-tiny": {
         "name": "BERT-Tiny (Fine-tuned)",
         "params": "4.4M",
         "size": "16.7 MB",
-        "desc": "Ultra-lightweight model. Extremely fast with very low resource usage but lower accuracy.",
+        "desc": "Ultra-compact 2-layer transformer with 75.0% F1 and 91.4% peak recall across legal boundaries.",
         "badge_class": "badge-tiny",
-        "best_f1": "2.6%"
+        "best_f1": "75.0%"
+    },
+    "bert-mini": {
+        "name": "BERT-Mini (Fine-tuned)",
+        "params": "11.1M",
+        "size": "42.4 MB",
+        "desc": "Lightweight 4-layer BERT variant delivering 68.4% F1 and 88.9% recall on contract sequences.",
+        "badge_class": "badge-mini",
+        "best_f1": "68.4%"
     }
 }
 

@@ -17,48 +17,191 @@ from gotcha import (
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-# Parse training history metrics for the dashboard
-def load_metrics_df():
+# Comprehensive training history & Optuna HPO telemetry loader
+def load_comprehensive_metrics():
     import json
-    rows = []
+    history_rows = []
+    optuna_trials_map = {}
+    models_summary_map = {}
     models = ["electra-small", "tinybert", "bert-mini", "bert-tiny"]
-    
+
     for m in models:
         path = os.path.join(BASE_DIR, "gotcha-extractor-model", f"{m}_metrics.json")
+        data = {}
         if os.path.exists(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                
-                final_run = data.get("final_run", {})
-                if final_run:
-                    epochs = final_run.get("epochs", [])
-                    f1s = final_run.get("f1", [])
-                    losses = final_run.get("loss", [])
-                    for i in range(len(epochs)):
-                        rows.append({
-                            "Model": m.upper(),
-                            "Epoch": epochs[i],
-                            "Validation F1": f1s[i] if i < len(f1s) else None,
-                            "Training Loss": losses[i] if i < len(losses) else None
-                        })
             except Exception as e:
                 print(f"Error reading metrics for {m}: {e}")
-                
-    if not rows:
-        # Fallback placeholder data if metrics JSON files are missing
+
+        final_run = data.get("final_run", {})
+        best_hp = data.get("best_hp", {})
+        trials = data.get("trials", {})
+        test_eval = data.get("test_eval", {})
+        summary = data.get("summary", {})
+
+        # Extract Optuna trials table
+        trial_rows = []
+        for t_num, t_info in trials.items():
+            params = t_info.get("params", {})
+            lr = params.get("learning_rate", "—")
+            wd = params.get("weight_decay", "—")
+            bs = params.get("per_device_train_batch_size", params.get("batch_size", "—"))
+            warmup = params.get("warmup_ratio", "—")
+            frozen = params.get("num_frozen_layers", "—")
+
+            f1_val = t_info.get("best_f1")
+            if f1_val is None and "f1" in t_info and t_info["f1"]:
+                f1_val = max(t_info["f1"])
+            elif f1_val is None:
+                f1_val = 0.0
+
+            lr_fmt = f"{lr:.2e}" if isinstance(lr, (int, float)) else str(lr)
+            wd_fmt = f"{wd:.4f}" if isinstance(wd, (int, float)) else str(wd)
+            warm_fmt = f"{warmup * 100:.1f}%" if isinstance(warmup, (int, float)) else str(warmup)
+            f1_fmt = f"{f1_val * 100:.2f}%" if isinstance(f1_val, (int, float)) else str(f1_val)
+
+            trial_rows.append({
+                "Trial": f"Trial #{t_num}",
+                "Val F1": f1_fmt,
+                "Learning Rate": lr_fmt,
+                "Weight Decay": wd_fmt,
+                "Batch Size": str(bs),
+                "Warmup Ratio": warm_fmt,
+                "Frozen Layers": str(frozen),
+                "_raw_f1": float(f1_val) if isinstance(f1_val, (int, float)) else 0.0
+            })
+
+        trial_rows.sort(key=lambda r: r["_raw_f1"], reverse=True)
+        for r in trial_rows:
+            del r["_raw_f1"]
+
+        optuna_trials_map[m] = pd.DataFrame(trial_rows) if trial_rows else pd.DataFrame(
+            columns=["Trial", "Val F1", "Learning Rate", "Weight Decay", "Batch Size", "Warmup Ratio", "Frozen Layers"]
+        )
+
+        # Store summary metadata
+        best_f1_num = summary.get("peak_val_f1", best_hp.get("best_f1", 0.0))
+        peak_f1_str = f"{best_f1_num * 100:.1f}%" if best_f1_num else MODEL_META.get(m, {}).get("best_f1", "—")
+        models_summary_map[m] = {
+            "name": MODEL_META.get(m, {}).get("name", m.upper()),
+            "peak_f1": peak_f1_str,
+            "peak_epoch": summary.get("peak_val_epoch", 10),
+            "optuna_f1": f"{summary.get('optuna_best_f1', best_hp.get('best_f1', 0.0)) * 100:.1f}%" if (summary.get("optuna_best_f1") or best_hp.get("best_f1")) else "—",
+            "test_f1": f"{test_eval.get('f1', 0.0) * 100:.1f}%" if test_eval.get("f1") else "—",
+            "test_recall": f"{test_eval.get('recall', 0.0) * 100:.1f}%" if test_eval.get("recall") else "—",
+            "test_precision": f"{test_eval.get('precision', 0.0) * 100:.1f}%" if test_eval.get("precision") else "—",
+            "test_loss": f"{test_eval.get('loss', 0.0):.4f}" if test_eval.get("loss") else "—",
+            "best_hp": best_hp,
+            "total_trials": len(trials),
+            "params": MODEL_META.get(m, {}).get("params", "—"),
+            "size": MODEL_META.get(m, {}).get("size", "—"),
+            "desc": MODEL_META.get(m, {}).get("desc", ""),
+        }
+
+        # Final run epoch histories
+        if final_run:
+            epochs = final_run.get("epochs", [])
+            f1s = final_run.get("f1", [])
+            eval_losses = final_run.get("eval_loss", final_run.get("loss", []))
+            train_losses = final_run.get("train_loss", eval_losses)
+            precs = final_run.get("precision", [])
+            recs = final_run.get("recall", [])
+            for i in range(len(epochs)):
+                history_rows.append({
+                    "Model": m.upper(),
+                    "Epoch": epochs[i],
+                    "Validation F1": f1s[i] if i < len(f1s) else None,
+                    "Validation Loss": eval_losses[i] if i < len(eval_losses) else None,
+                    "Training Loss": train_losses[i] if i < len(train_losses) else None,
+                    "Precision": precs[i] if i < len(precs) else None,
+                    "Recall": recs[i] if i < len(recs) else None,
+                })
+
+    if not history_rows:
         for m in models:
             for epoch in range(1, 11):
-                rows.append({
+                history_rows.append({
                     "Model": m.upper(),
                     "Epoch": epoch,
                     "Validation F1": 0.05 * epoch if m == "electra-small" else 0.02 * epoch,
-                    "Training Loss": 0.8 / epoch
+                    "Validation Loss": 0.8 / epoch,
+                    "Training Loss": 0.85 / epoch,
+                    "Precision": 0.03 * epoch,
+                    "Recall": 0.06 * epoch
                 })
-    return pd.DataFrame(rows)
+
+    metrics_df = pd.DataFrame(history_rows)
+    return metrics_df, optuna_trials_map, models_summary_map
 
 
-METRICS_DF = load_metrics_df()
+METRICS_DF, OPTUNA_TRIALS_MAP, MODELS_SUMMARY_MAP = load_comprehensive_metrics()
+
+
+def render_hpo_card(model_key: str) -> str:
+    summary = MODELS_SUMMARY_MAP.get(model_key, {})
+    best_hp = summary.get("best_hp", {})
+    name = summary.get("name", model_key.upper())
+    peak_f1 = summary.get("peak_f1", "—")
+    optuna_f1 = summary.get("optuna_f1", "—")
+    test_f1 = summary.get("test_f1", "—")
+    test_rec = summary.get("test_recall", "—")
+    trials_count = summary.get("total_trials", 0)
+
+    lr = best_hp.get("learning_rate", "—")
+    wd = best_hp.get("weight_decay", "—")
+    bs = best_hp.get("batch_size", "—")
+    warmup = best_hp.get("warmup_ratio", "—")
+    frozen = best_hp.get("num_frozen_layers", 0)
+
+    lr_str = f"{lr:.2e}" if isinstance(lr, (int, float)) else str(lr)
+    wd_str = f"{wd:.4f}" if isinstance(wd, (int, float)) else str(wd)
+    warm_str = f"{warmup * 100:.1f}%" if isinstance(warmup, (int, float)) else str(warmup)
+
+    return f"""
+    <div style="background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1.25rem; margin-bottom: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.75rem; border-bottom: 1px solid var(--border-subtle); padding-bottom: 0.5rem; flex-wrap: wrap; gap: 0.5rem;">
+            <div>
+                <span style="font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.12em; color: var(--accent-gold); text-transform: uppercase;">ARCHITECTURE TELEMETRY & OPTIMAL CONFIGURATION</span>
+                <div style="font-family: var(--font-display); font-size: 1.25rem; font-weight: 600; color: var(--ink-primary); margin-top: 0.2rem;">{name}</div>
+            </div>
+            <div style="text-align: right;">
+                <span style="font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-muted);">OPTUNA SEARCH CAPACITY:</span>
+                <span style="font-family: var(--font-mono); font-size: 0.9rem; font-weight: 700; color: var(--accent-cyan); margin-left: 0.4rem;">{trials_count} Trials Evaluated</span>
+            </div>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.75rem; margin-bottom: 0.75rem;">
+            <div style="background: var(--bg-card); padding: 0.6rem 0.8rem; border-left: 2px solid var(--accent-crimson);">
+                <div style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-muted); text-transform: uppercase;">Peak Val F1</div>
+                <div style="font-family: var(--font-mono); font-size: 1.15rem; font-weight: 700; color: var(--accent-crimson);">{peak_f1}</div>
+            </div>
+            <div style="background: var(--bg-card); padding: 0.6rem 0.8rem; border-left: 2px solid var(--accent-amber);">
+                <div style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-muted); text-transform: uppercase;">Optuna Best F1</div>
+                <div style="font-family: var(--font-mono); font-size: 1.15rem; font-weight: 700; color: var(--accent-amber);">{optuna_f1 if optuna_f1 != '—' else peak_f1}</div>
+            </div>
+            <div style="background: var(--bg-card); padding: 0.6rem 0.8rem; border-left: 2px solid var(--accent-cyan);">
+                <div style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-muted); text-transform: uppercase;">Optimal LR</div>
+                <div style="font-family: var(--font-mono); font-size: 1.05rem; font-weight: 600; color: var(--accent-cyan);">{lr_str}</div>
+            </div>
+            <div style="background: var(--bg-card); padding: 0.6rem 0.8rem; border-left: 2px solid var(--ink-muted);">
+                <div style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-muted); text-transform: uppercase;">Weight Decay</div>
+                <div style="font-family: var(--font-mono); font-size: 1.05rem; font-weight: 600; color: var(--ink-primary);">{wd_str}</div>
+            </div>
+            <div style="background: var(--bg-card); padding: 0.6rem 0.8rem; border-left: 2px solid var(--ink-muted);">
+                <div style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-muted); text-transform: uppercase;">Batch / Warmup</div>
+                <div style="font-family: var(--font-mono); font-size: 1.05rem; font-weight: 600; color: var(--ink-primary);">{bs} / {warm_str}</div>
+            </div>
+            <div style="background: var(--bg-card); padding: 0.6rem 0.8rem; border-left: 2px solid var(--ink-muted);">
+                <div style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-muted); text-transform: uppercase;">Frozen Layers</div>
+                <div style="font-family: var(--font-mono); font-size: 1.05rem; font-weight: 600; color: var(--ink-primary);">{frozen}</div>
+            </div>
+        </div>
+        <div style="font-family: var(--font-ui); font-size: 0.85rem; color: var(--ink-secondary);">
+            {summary.get('desc', '')}
+        </div>
+    </div>
+    """
 
 
 def categorize_gotcha(sentence: str) -> dict:
@@ -975,19 +1118,20 @@ with gr.Blocks(**blocks_kwargs) as demo:
             
             leaderboard_rows = []
             for m in AVAILABLE_MODELS:
-                meta = MODEL_META[m]
+                summary = MODELS_SUMMARY_MAP.get(m, {})
                 leaderboard_rows.append([
-                    meta["name"],
-                    meta["best_f1"],
-                    meta["params"],
-                    meta["size"],
-                    meta["desc"]
+                    summary.get("name", m.upper()),
+                    summary.get("peak_f1", "—"),
+                    summary.get("optuna_f1", "—"),
+                    summary.get("params", "—"),
+                    summary.get("size", "—"),
+                    summary.get("desc", "")
                 ])
                 
             gr.Dataframe(
                 value=leaderboard_rows,
-                headers=["Architecture", "Validation F1", "Parameters", "Footprint", "Design Rationale"],
-                datatype=["str", "str", "str", "str", "str"],
+                headers=["Architecture", "Peak Val F1", "Optuna Best F1", "Parameters", "Footprint", "Design Rationale"],
+                datatype=["str", "str", "str", "str", "str", "str"],
                 interactive=False
             )
             
@@ -1009,9 +1153,46 @@ with gr.Blocks(**blocks_kwargs) as demo:
                     title="Weighted Cross-Entropy Loss vs. Epochs",
                     tooltip=["Model", "Epoch", "Training Loss"]
                 )
-                
+
             gr.HTML("""
-            <div style="background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1.5rem; margin-top: 1rem;">
+            <div style="margin: 2rem 0 1rem 0;">
+                <div style="font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.12em; color: var(--accent-gold); margin-bottom: 0.35rem;">
+                    OPTUNA HYPERPARAMETER OPTIMIZATION & TRIAL LEDGER
+                </div>
+                <div style="font-family: var(--font-ui); font-size: 0.95rem; color: var(--ink-secondary);">
+                    Select any transformer backbone to inspect its hyperparameter trial evaluations, search trajectories, and optimal convergence parameters.
+                </div>
+            </div>
+            """)
+
+            with gr.Row():
+                hpo_model_select = gr.Dropdown(
+                    choices=AVAILABLE_MODELS,
+                    value="electra-small",
+                    label="Select Architecture for HPO Deep-Dive",
+                    info="Filter trial ledger and optimal hyperparameters"
+                )
+
+            hpo_card_output = gr.HTML(value=render_hpo_card("electra-small"))
+
+            hpo_trials_table = gr.Dataframe(
+                value=OPTUNA_TRIALS_MAP.get("electra-small", pd.DataFrame()),
+                headers=["Trial", "Val F1", "Learning Rate", "Weight Decay", "Batch Size", "Warmup Ratio", "Frozen Layers"],
+                label="Optuna Hyperparameter Trial Rankings (Sorted by Validation F1)",
+                interactive=False
+            )
+
+            def on_hpo_model_change(m_key):
+                return render_hpo_card(m_key), OPTUNA_TRIALS_MAP.get(m_key, pd.DataFrame())
+
+            hpo_model_select.change(
+                fn=on_hpo_model_change,
+                inputs=[hpo_model_select],
+                outputs=[hpo_card_output, hpo_trials_table]
+            )
+            
+            gr.HTML("""
+            <div style="background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1.5rem; margin-top: 1.5rem;">
                 <div style="font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.15em; color: var(--accent-gold); margin-bottom: 0.5rem;">
                     FORENSIC ARCHITECTURE NOTES
                 </div>

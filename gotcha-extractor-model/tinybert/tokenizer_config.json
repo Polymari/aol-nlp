@@ -1,5 +1,4 @@
 {
-  "add_prefix_space": false,
   "backend": "tokenizers",
   "cls_token": "[CLS]",
   "do_lower_case": true,
