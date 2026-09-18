@@ -2,6 +2,33 @@ import os
 import re
 import time
 import pandas as pd
+
+# Compatibility patch for Gradio 4 with huggingface_hub>=0.25.0
+try:
+    import huggingface_hub
+    if not hasattr(huggingface_hub, "HfFolder"):
+        class _HfFolderFallback:
+            @staticmethod
+            def get_token():
+                return huggingface_hub.get_token()
+            @staticmethod
+            def save_token(token):
+                if hasattr(huggingface_hub, "login"):
+                    try:
+                        huggingface_hub.login(token=token)
+                    except Exception:
+                        pass
+            @staticmethod
+            def delete_token():
+                if hasattr(huggingface_hub, "logout"):
+                    try:
+                        huggingface_hub.logout()
+                    except Exception:
+                        pass
+        huggingface_hub.HfFolder = _HfFolderFallback
+except Exception:
+    pass
+
 import gradio as gr
 
 from gotcha import (
