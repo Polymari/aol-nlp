@@ -1,5 +1,4 @@
 import os
-import re
 import time
 import pandas as pd
 
@@ -35,7 +34,7 @@ from gotcha import (
     AVAILABLE_MODELS,
     MODEL_META,
     COLOR_MAP,
-    clean_text_pipeline,
+    RISK_INK,
     classify_text,
     compare_models as gotcha_compare_models,
     get_inference_device
@@ -44,15 +43,17 @@ from gotcha import (
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-# Comprehensive training history & Optuna HPO telemetry loader
+# ---------------------------------------------------------------------------
+# Training telemetry ledger (reads the JSON written by train.py)
+# ---------------------------------------------------------------------------
+
 def load_comprehensive_metrics():
     import json
     history_rows = []
     optuna_trials_map = {}
     models_summary_map = {}
-    models = ["electra-small", "tinybert", "bert-mini", "bert-tiny"]
 
-    for m in models:
+    for m in AVAILABLE_MODELS:
         path = os.path.join(BASE_DIR, "gotcha-extractor-model", f"{m}_metrics.json")
         data = {}
         if os.path.exists(path):
@@ -68,1168 +69,1383 @@ def load_comprehensive_metrics():
         test_eval = data.get("test_eval", {})
         summary = data.get("summary", {})
 
-        # Extract Optuna trials table
         trial_rows = []
         for t_num, t_info in trials.items():
             params = t_info.get("params", {})
-            lr = params.get("learning_rate", "—")
-            wd = params.get("weight_decay", "—")
-            bs = params.get("per_device_train_batch_size", params.get("batch_size", "—"))
-            warmup = params.get("warmup_ratio", "—")
-            frozen = params.get("num_frozen_layers", "—")
-
             f1_val = t_info.get("best_f1")
-            if f1_val is None and "f1" in t_info and t_info["f1"]:
+            if f1_val is None and t_info.get("f1"):
                 f1_val = max(t_info["f1"])
-            elif f1_val is None:
-                f1_val = 0.0
-
-            lr_fmt = f"{lr:.2e}" if isinstance(lr, (int, float)) else str(lr)
-            wd_fmt = f"{wd:.4f}" if isinstance(wd, (int, float)) else str(wd)
-            warm_fmt = f"{warmup * 100:.1f}%" if isinstance(warmup, (int, float)) else str(warmup)
-            f1_fmt = f"{f1_val * 100:.2f}%" if isinstance(f1_val, (int, float)) else str(f1_val)
 
             trial_rows.append({
-                "Trial": f"Trial #{t_num}",
-                "Val F1": f1_fmt,
-                "Learning Rate": lr_fmt,
-                "Weight Decay": wd_fmt,
-                "Batch Size": str(bs),
-                "Warmup Ratio": warm_fmt,
-                "Frozen Layers": str(frozen),
-                "_raw_f1": float(f1_val) if isinstance(f1_val, (int, float)) else 0.0
+                "Trial": t_num,
+                "Val F1": f"{f1_val:.3f}" if isinstance(f1_val, (int, float)) else "—",
+                "Learning rate": f"{params['learning_rate']:.2e}" if isinstance(params.get("learning_rate"), (int, float)) else "—",
+                "Weight decay": f"{params['weight_decay']:.4f}" if isinstance(params.get("weight_decay"), (int, float)) else "—",
+                "Batch": str(params.get("per_device_train_batch_size", "—")),
+                "Warmup": f"{params['warmup_ratio'] * 100:.0f}%" if isinstance(params.get("warmup_ratio"), (int, float)) else "—",
+                "Frozen": str(params.get("num_frozen_layers", "—")),
+                "_raw": float(f1_val) if isinstance(f1_val, (int, float)) else 0.0
             })
 
-        trial_rows.sort(key=lambda r: r["_raw_f1"], reverse=True)
+        trial_rows.sort(key=lambda r: r["_raw"], reverse=True)
         for r in trial_rows:
-            del r["_raw_f1"]
+            del r["_raw"]
 
-        optuna_trials_map[m] = pd.DataFrame(trial_rows) if trial_rows else pd.DataFrame(
-            columns=["Trial", "Val F1", "Learning Rate", "Weight Decay", "Batch Size", "Warmup Ratio", "Frozen Layers"]
-        )
+        optuna_trials_map[m] = pd.DataFrame(trial_rows) if trial_rows else pd.DataFrame()
 
-        # Store summary metadata
-        best_f1_num = summary.get("peak_val_f1", best_hp.get("best_f1", 0.0))
-        peak_f1_str = f"{best_f1_num * 100:.1f}%" if best_f1_num else MODEL_META.get(m, {}).get("best_f1", "—")
         models_summary_map[m] = {
             "name": MODEL_META.get(m, {}).get("name", m.upper()),
-            "peak_f1": peak_f1_str,
-            "peak_epoch": summary.get("peak_val_epoch", 10),
-            "optuna_f1": f"{summary.get('optuna_best_f1', best_hp.get('best_f1', 0.0)) * 100:.1f}%" if (summary.get("optuna_best_f1") or best_hp.get("best_f1")) else "—",
-            "test_f1": f"{test_eval.get('f1', 0.0) * 100:.1f}%" if test_eval.get("f1") else "—",
-            "test_recall": f"{test_eval.get('recall', 0.0) * 100:.1f}%" if test_eval.get("recall") else "—",
-            "test_precision": f"{test_eval.get('precision', 0.0) * 100:.1f}%" if test_eval.get("precision") else "—",
-            "test_loss": f"{test_eval.get('loss', 0.0):.4f}" if test_eval.get("loss") else "—",
+            "test_f1": test_eval.get("f1"),
+            "test_recall": test_eval.get("recall"),
+            "test_precision": test_eval.get("precision"),
+            "test_accuracy": test_eval.get("accuracy"),
             "best_hp": best_hp,
             "total_trials": len(trials),
-            "params": MODEL_META.get(m, {}).get("params", "—"),
-            "size": MODEL_META.get(m, {}).get("size", "—"),
             "desc": MODEL_META.get(m, {}).get("desc", ""),
+            "params": MODEL_META.get(m, {}).get("params", "—"),
         }
 
-        # Final run epoch histories
-        if final_run:
-            epochs = final_run.get("epochs", [])
-            f1s = final_run.get("f1", [])
-            eval_losses = final_run.get("eval_loss", final_run.get("loss", []))
-            train_losses = final_run.get("train_loss", eval_losses)
-            precs = final_run.get("precision", [])
-            recs = final_run.get("recall", [])
-            for i in range(len(epochs)):
-                history_rows.append({
-                    "Model": m.upper(),
-                    "Epoch": epochs[i],
-                    "Validation F1": f1s[i] if i < len(f1s) else None,
-                    "Validation Loss": eval_losses[i] if i < len(eval_losses) else None,
-                    "Training Loss": train_losses[i] if i < len(train_losses) else None,
-                    "Precision": precs[i] if i < len(precs) else None,
-                    "Recall": recs[i] if i < len(recs) else None,
-                })
-
-    if not history_rows:
-        for m in models:
-            for epoch in range(1, 11):
-                history_rows.append({
-                    "Model": m.upper(),
-                    "Epoch": epoch,
-                    "Validation F1": 0.05 * epoch if m == "electra-small" else 0.02 * epoch,
-                    "Validation Loss": 0.8 / epoch,
-                    "Training Loss": 0.85 / epoch,
-                    "Precision": 0.03 * epoch,
-                    "Recall": 0.06 * epoch
-                })
+        epochs = final_run.get("epochs", [])
+        f1s = final_run.get("f1", [])
+        train_losses = final_run.get("train_loss", [])
+        eval_losses = final_run.get("eval_loss", final_run.get("loss", []))
+        for i in range(len(epochs)):
+            history_rows.append({
+                "Model": m,
+                "Epoch": epochs[i],
+                "Validation F1": f1s[i] if i < len(f1s) else None,
+                "Training loss": train_losses[i] if i < len(train_losses) else None,
+                "Validation loss": eval_losses[i] if i < len(eval_losses) else None,
+            })
 
     metrics_df = pd.DataFrame(history_rows)
+    if not history_rows:
+        metrics_df = pd.DataFrame(columns=["Model", "Epoch", "Validation F1", "Training loss", "Validation loss"])
     return metrics_df, optuna_trials_map, models_summary_map
 
 
 METRICS_DF, OPTUNA_TRIALS_MAP, MODELS_SUMMARY_MAP = load_comprehensive_metrics()
 
 
-def render_hpo_card(model_key: str) -> str:
-    summary = MODELS_SUMMARY_MAP.get(model_key, {})
-    best_hp = summary.get("best_hp", {})
-    name = summary.get("name", model_key.upper())
-    peak_f1 = summary.get("peak_f1", "—")
-    optuna_f1 = summary.get("optuna_f1", "—")
-    test_f1 = summary.get("test_f1", "—")
-    test_rec = summary.get("test_recall", "—")
-    trials_count = summary.get("total_trials", 0)
+def fmt_pct(value, digits=1):
+    if isinstance(value, (int, float)) and value:
+        return f"{value * 100:.{digits}f}%"
+    return "—"
 
-    lr = best_hp.get("learning_rate", "—")
-    wd = best_hp.get("weight_decay", "—")
-    bs = best_hp.get("batch_size", "—")
-    warmup = best_hp.get("warmup_ratio", "—")
-    frozen = best_hp.get("num_frozen_layers", 0)
 
-    lr_str = f"{lr:.2e}" if isinstance(lr, (int, float)) else str(lr)
-    wd_str = f"{wd:.4f}" if isinstance(wd, (int, float)) else str(wd)
-    warm_str = f"{warmup * 100:.1f}%" if isinstance(warmup, (int, float)) else str(warmup)
-
-    return f"""
-    <div style="background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1.25rem; margin-bottom: 1rem;">
-        <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.75rem; border-bottom: 1px solid var(--border-subtle); padding-bottom: 0.5rem; flex-wrap: wrap; gap: 0.5rem;">
-            <div>
-                <span style="font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.12em; color: var(--accent-gold); text-transform: uppercase;">ARCHITECTURE TELEMETRY & OPTIMAL CONFIGURATION</span>
-                <div style="font-family: var(--font-display); font-size: 1.25rem; font-weight: 600; color: var(--ink-primary); margin-top: 0.2rem;">{name}</div>
-            </div>
-            <div style="text-align: right;">
-                <span style="font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-muted);">OPTUNA SEARCH CAPACITY:</span>
-                <span style="font-family: var(--font-mono); font-size: 0.9rem; font-weight: 700; color: var(--accent-cyan); margin-left: 0.4rem;">{trials_count} Trials Evaluated</span>
-            </div>
-        </div>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.75rem; margin-bottom: 0.75rem;">
-            <div style="background: var(--bg-card); padding: 0.6rem 0.8rem; border-left: 2px solid var(--accent-crimson);">
-                <div style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-muted); text-transform: uppercase;">Peak Val F1</div>
-                <div style="font-family: var(--font-mono); font-size: 1.15rem; font-weight: 700; color: var(--accent-crimson);">{peak_f1}</div>
-            </div>
-            <div style="background: var(--bg-card); padding: 0.6rem 0.8rem; border-left: 2px solid var(--accent-amber);">
-                <div style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-muted); text-transform: uppercase;">Optuna Best F1</div>
-                <div style="font-family: var(--font-mono); font-size: 1.15rem; font-weight: 700; color: var(--accent-amber);">{optuna_f1 if optuna_f1 != '—' else peak_f1}</div>
-            </div>
-            <div style="background: var(--bg-card); padding: 0.6rem 0.8rem; border-left: 2px solid var(--accent-cyan);">
-                <div style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-muted); text-transform: uppercase;">Optimal LR</div>
-                <div style="font-family: var(--font-mono); font-size: 1.05rem; font-weight: 600; color: var(--accent-cyan);">{lr_str}</div>
-            </div>
-            <div style="background: var(--bg-card); padding: 0.6rem 0.8rem; border-left: 2px solid var(--ink-muted);">
-                <div style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-muted); text-transform: uppercase;">Weight Decay</div>
-                <div style="font-family: var(--font-mono); font-size: 1.05rem; font-weight: 600; color: var(--ink-primary);">{wd_str}</div>
-            </div>
-            <div style="background: var(--bg-card); padding: 0.6rem 0.8rem; border-left: 2px solid var(--ink-muted);">
-                <div style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-muted); text-transform: uppercase;">Batch / Warmup</div>
-                <div style="font-family: var(--font-mono); font-size: 1.05rem; font-weight: 600; color: var(--ink-primary);">{bs} / {warm_str}</div>
-            </div>
-            <div style="background: var(--bg-card); padding: 0.6rem 0.8rem; border-left: 2px solid var(--ink-muted);">
-                <div style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-muted); text-transform: uppercase;">Frozen Layers</div>
-                <div style="font-family: var(--font-mono); font-size: 1.05rem; font-weight: 600; color: var(--ink-primary);">{frozen}</div>
-            </div>
-        </div>
-        <div style="font-family: var(--font-ui); font-size: 0.85rem; color: var(--ink-secondary);">
-            {summary.get('desc', '')}
-        </div>
-    </div>
-    """
-
+# ---------------------------------------------------------------------------
+# Clause taxonomy
+# ---------------------------------------------------------------------------
 
 def categorize_gotcha(sentence: str) -> dict:
-    """Analyze the substantive legal risk of a flagged clause and assign editorial categorization."""
-    s_lower = sentence.lower()
-    if re.search(r"arbitrat|class\s+action|jury|court\s+proceeding|dispute", s_lower):
+    """Classify a flagged clause into one of the risk families the model detects."""
+    s = sentence.lower()
+    if any(k in s for k in ("arbitrat", "class action", "jury", "court proceeding", "dispute")):
         return {
-            "title": "FORCED ARBITRATION & LITIGATION BAN",
-            "docket": "SEC-ARB-01",
-            "badge": "CRITICAL RISK",
-            "badge_class": "badge-crimson",
-            "analysis": "Deprives the consumer of constitutional court access, trial by jury, and collective action remedies through mandatory confidential arbitration."
+            "title": "Forced arbitration",
+            "family": "Dispute resolution",
+            "detail": "Removes your access to court and to collective action, and routes disputes through private arbitration."
         }
-    if re.search(r"sell|broker|market|advertis|third\s+part|location\s+data|usage\s+habit|telemetry", s_lower):
+    if any(k in s for k in ("sell", "broker", "advertis", "third part", "market your", "telemetry", "location data")):
         return {
-            "title": "SURVEILLANCE & DATA BROKERAGE",
-            "docket": "SEC-DAT-04",
-            "badge": "CRITICAL RISK",
-            "badge_class": "badge-crimson",
-            "analysis": "Authorizes monetization, commercial profiling, and syndication of user behavioral identifiers to unverified third-party brokers."
+            "title": "Data brokerage",
+            "family": "Privacy",
+            "detail": "Authorizes collecting and syndicating your activity to outside advertisers and data brokers."
         }
-    if re.search(r"modify|revise|update|without\s+notice|reserve\s+the\s+right\s+to|at\s+any\s+time", s_lower):
+    if any(k in s for k in ("modify", "revise", "update these", "without notice", "without prior notice", "at any time", "sole and absolute discretion")):
         return {
-            "title": "UNILATERAL TERMS MUTATION",
-            "docket": "SEC-MUT-02",
-            "badge": "ADVERSE TERM",
-            "badge_class": "badge-amber",
-            "analysis": "Permits retroactive alteration of legal covenants without affirmative counterparty notification or re-negotiation rights."
+            "title": "Unilateral modification",
+            "family": "Contract terms",
+            "detail": "Lets the company change these terms on its own, without telling you or asking you to agree again."
         }
-    if re.search(r"indemni|hold\s+harmless|defend|liabilit", s_lower):
+    if any(k in s for k in ("indemni", "hold harmless", "defend", "liabilit")):
         return {
-            "title": "ASYMMETRIC INDEMNIFICATION SHIELD",
-            "docket": "SEC-IND-03",
-            "badge": "ADVERSE TERM",
-            "badge_class": "badge-amber",
-            "analysis": "Shifts corporate litigation fees, third-party damages, and corporate liabilities directly onto the individual user."
+            "title": "Indemnification",
+            "family": "Liability",
+            "detail": "Shifts legal costs and third-party claims onto you, including claims caused by the company's own conduct."
         }
-    if re.search(r"no\s+warranty|as\s+is|cannot\s+(ensure|warrant|guarantee)", s_lower):
+    if any(k in s for k in ("no warranty", "as is", "as-is", "cannot ensure", "cannot warrant", "cannot guarantee")):
         return {
-            "title": "BLANKET WARRANTY WAIVER ('AS-IS')",
-            "docket": "SEC-WAR-05",
-            "badge": "CAUTIONARY",
-            "badge_class": "badge-stone",
-            "analysis": "Disclaims all merchantability, fitness for purpose, and continuity of service, leaving counterparty without remedy."
+            "title": "Warranty disclaimer",
+            "family": "Remedies",
+            "detail": "Disclaims any promise that the service will work as expected, leaving you without a remedy if it does not."
         }
     return {
-        "title": "RESTRICTIVE LEGAL STIPULATION",
-        "docket": "SEC-GEN-00",
-        "badge": "CAUTIONARY",
-        "badge_class": "badge-stone",
-        "analysis": "Contractual asymmetry restricting ordinary consumer privileges, legal remedies, or data autonomy."
+        "title": "Restrictive term",
+        "family": "General",
+        "detail": "Restricts a right or benefit you would reasonably expect to keep."
     }
 
 
-# Single-model analysis handler
-def analyze_single(text, model_name, min_tokens):
-    if not text or not text.strip():
-        placeholder_stats = """
-        <div class="telemetry-grid">
-            <div class="telemetry-cell">
-                <div class="cell-label">Critical Risks</div>
-                <div class="cell-value">—</div>
-                <div class="cell-desc">Arbitration & data syndication</div>
+SEVERITY_ORDER = {"HIGH RISK": 0, "MEDIUM RISK": 1, "LOW RISK": 2}
+
+
+def render_findings(results):
+    """Render flagged clauses as an ordered findings list."""
+    flagged = [(seg.strip(), label) for seg, label in results if label and seg.strip()]
+    if not flagged:
+        return ""
+    flagged.sort(key=lambda item: SEVERITY_ORDER.get(item[1], 3))
+
+    items = []
+    for i, (segment, label) in enumerate(flagged, 1):
+        info = categorize_gotcha(segment)
+        ink = RISK_INK.get(label, RISK_INK["LOW RISK"])
+        items.append(f"""
+        <li class="finding" style="--ink: {ink}">
+          <div class="finding-head">
+            <span class="finding-num">{i:02d}</span>
+            <div>
+              <div class="finding-title">{info['title']}</div>
+              <div class="finding-family">{info['family']} · {label.replace(' RISK', '').title()} risk</div>
             </div>
-            <div class="telemetry-cell">
-                <div class="cell-label">Adverse Covenants</div>
-                <div class="cell-value">—</div>
-                <div class="cell-desc">Silent modifications & tracking</div>
-            </div>
-            <div class="telemetry-cell">
-                <div class="cell-label">Cautionary Terms</div>
-                <div class="cell-value">—</div>
-                <div class="cell-desc">As-is warranty & liability disclaimers</div>
-            </div>
-            <div class="telemetry-cell">
-                <div class="cell-label">Inference Velocity</div>
-                <div class="cell-value">—</div>
-                <div class="cell-desc">Neural forward-pass runtime</div>
-            </div>
-        </div>
-        """
-        placeholder_dossier = """
-        <div class="dossier-empty">
-            <div class="empty-icon">§</div>
-            <div class="empty-title">Awaiting Legal Agreement Submission</div>
-            <div class="empty-sub">Paste contractual clauses into the console or select a historical docket above to execute forensic extraction.</div>
-        </div>
-        """
-        return [], placeholder_stats, placeholder_dossier
-    
-    start_time = time.time()
-    results = classify_text(text, model_name=model_name, min_risk_tokens=min_tokens)
-    elapsed = (time.time() - start_time) * 1000
-    device_name = get_inference_device().type.upper()
-    
-    high_count = 0
-    med_count = 0
-    low_count = 0
-    flagged_cards = []
-    
-    for idx, (text_seg, label) in enumerate(results):
-        clean_seg = text_seg.strip()
-        if not clean_seg or label is None:
-            continue
-            
-        info = categorize_gotcha(clean_seg)
-        
-        if label == "HIGH RISK":
-            high_count += 1
-            severity_badge = '<span class="dossier-badge badge-crimson">SEVERITY I // CRITICAL</span>'
-        elif label == "MEDIUM RISK":
-            med_count += 1
-            severity_badge = '<span class="dossier-badge badge-amber">SEVERITY II // ADVERSE</span>'
-        else:
-            low_count += 1
-            severity_badge = '<span class="dossier-badge badge-stone">SEVERITY III // CAUTIONARY</span>'
-            
-        card_html = f"""
-        <div class="dossier-card">
-            <div class="card-header-row">
-                <div class="docket-code">{info['docket']} · CLAUSE #{high_count + med_count + low_count:02d}</div>
-                <div class="docket-title">{info['title']}</div>
-                {severity_badge}
-            </div>
-            <div class="card-body-quote">
-                <span class="quote-mark">“</span>{clean_seg}<span class="quote-mark">”</span>
-            </div>
-            <div class="card-footer-analysis">
-                <span class="footer-label">LEGAL AUDIT:</span> {info['analysis']}
-            </div>
-        </div>
-        """
-        flagged_cards.append(card_html)
-        
-    device_badge = f"{device_name} ACCELERATED" if device_name == "CUDA" else "CPU ENGINE"
-    
-    stats_html = f"""
-    <div class="telemetry-grid">
-        <div class="telemetry-cell cell-crimson">
-            <div class="cell-label">Critical Threats</div>
-            <div class="cell-value">{high_count}</div>
-            <div class="cell-desc">Forced arbitration & data liquidation</div>
-        </div>
-        <div class="telemetry-cell cell-amber">
-            <div class="cell-label">Adverse Covenants</div>
-            <div class="cell-value">{med_count}</div>
-            <div class="cell-desc">Unilateral changes & tracking trackers</div>
-        </div>
-        <div class="telemetry-cell cell-stone">
-            <div class="cell-label">Cautionary Terms</div>
-            <div class="cell-value">{low_count}</div>
-            <div class="cell-desc">Broad disclaimers & liability shifts</div>
-        </div>
-        <div class="telemetry-cell cell-cyan">
-            <div class="cell-label">Inference Velocity</div>
-            <div class="cell-value">{elapsed:.1f}<span class="unit">ms</span></div>
-            <div class="cell-desc">{device_badge}</div>
-        </div>
+          </div>
+          <blockquote class="finding-quote">{segment}</blockquote>
+          <p class="finding-detail">{info['detail']}</p>
+        </li>
+        """)
+    return f'<ol class="findings">{"".join(items)}</ol>'
+
+
+def render_summary(counts, elapsed_ms):
+    """A single honest sentence about what was found, plus secondary metadata."""
+    total = counts["high"] + counts["medium"] + counts["low"]
+    if total == 0:
+        return ""
+    parts = [f"{counts['high']} high risk", f"{counts['medium']} medium", f"{counts['low']} low"]
+    device = get_inference_device().type.upper()
+    return f"""
+    <div class="summary">
+      <p class="summary-line">{total} flagged clause{'' if total == 1 else 's'}: {', '.join(parts)}.</p>
+      <p class="summary-meta">{elapsed_ms:.0f} ms · {device} · BIO token classification</p>
     </div>
     """
-    
-    if flagged_cards:
-        dossier_html = f"""
-        <div class="dossier-container">
-            <div class="dossier-header-bar">
-                <span class="dossier-title">DISCRIMINATOR FINDINGS ({len(flagged_cards)} DETECTED CLAUSES)</span>
-                <span class="dossier-meta">MODEL: {model_name.upper()} // TOK-THRES: {min_tokens}</span>
-            </div>
-            {''.join(flagged_cards)}
+
+
+def empty_state(has_text):
+    if not has_text:
+        return """
+        <div class="empty">
+          <p class="empty-title">Paste a contract to begin</p>
+          <p class="empty-body">Terms of service, a privacy policy, or an EULA. Every sentence is
+          classified for risky clauses and the flagged text is marked in place.</p>
         </div>
         """
-    else:
-        dossier_html = """
-        <div class="dossier-clear">
-            <div class="clear-icon">✓</div>
-            <div class="clear-title">AUDIT PASSED // NO ADVERSE GOTCHAS DETECTED</div>
-            <div class="clear-desc">The examined clauses do not exhibit standard mandatory arbitration, unilateral modification, or data liquidation markers at the selected sensitivity threshold.</div>
-        </div>
-        """
-        
-    return results, stats_html, dossier_html
+    return """
+    <div class="empty">
+      <p class="empty-title">No risky clauses flagged</p>
+      <p class="empty-body">Nothing in this text crossed the sensitivity threshold. Try lowering the
+      threshold to one if you want a more sensitive pass.</p>
+    </div>
+    """
 
 
-# Multi-model comparison handler
-def compare_models(text, min_tokens):
-    return gotcha_compare_models(text, min_tokens=min_tokens)
+# ---------------------------------------------------------------------------
+# Handlers
+# ---------------------------------------------------------------------------
+
+def to_highlight_pairs(results):
+    """Normalize classified segments for HighlightedText.
+
+    The pipeline emits inter-sentence whitespace as its own (label=None)
+    segment. Gradio hides those spans when show_whitespaces is off, which
+    glues adjacent words together and breaks them mid-token. Folding the
+    whitespace into the preceding segment keeps the prose intact.
+    """
+    pairs = []
+    for segment, label in results:
+        if not pairs:
+            if segment.strip():
+                pairs.append([segment, label])
+            continue
+        if not segment.strip():
+            pairs[-1][0] += segment
+        else:
+            pairs.append([segment, label])
+    return [(text, label) for text, label in pairs]
 
 
-# Distinctive Real-World Legal Covenants
-PRESET_CASES = {
-    "case_arbitration": (
-        "Welcome to the platform. By continuing to use our services, you expressly agree that any and all disputes, "
-        "claims, or controversies arising out of or relating to these Terms shall be resolved exclusively by confidential, "
-        "binding arbitration administered by the American Arbitration Association, and you expressly waive any right to a "
-        "trial by jury or to participate in a class action lawsuit or class-wide arbitration."
-    ),
-    "case_surveillance": (
-        "We reserve the right to collect, synthesize, and monetize your precise geographic coordinates, device identifiers, "
-        "and browsing habits, and to syndicate such behavioral telemetry to commercial third parties, ad networks, and data "
-        "brokers for targeted advertising and market research without further notice to you."
-    ),
-    "case_modification": (
-        "We reserve the right, at our sole and absolute discretion, to modify, amend, replace, or update these Terms of Service "
-        "at any time without prior notice. Your continued access to or use of the service following the posting of any modifications "
-        "constitutes binding and irrevocable acceptance of the revised covenants."
-    ),
-    "case_indemnity": (
-        "You agree to defend, indemnify, and hold harmless the Company, its subsidiaries, affiliates, officers, and directors "
-        "from and against any and all claims, liabilities, damages, losses, expenses, and reasonable attorneys' fees arising "
-        "out of or in any way connected with your access to or use of the Services, including any claims resulting from our own negligence."
+def analyze_single(text, model_name, min_tokens):
+    """Run the classifier and return every output the workspace needs.
+
+    Returns (annotated_text, summary_html, findings_html, annotated_update)
+    where the update reveals the annotated panel only when there is
+    something to show.
+    """
+    if not text or not text.strip():
+        return [], empty_state(False), "", gr.update(visible=False)
+
+    start = time.time()
+    try:
+        results = classify_text(text, model_name=model_name, min_risk_tokens=min_tokens)
+    except Exception as e:
+        error = (
+            f'<div class="notice notice-error"><p class="empty-title">Analysis failed</p>'
+            f'<p class="empty-body">{e}</p></div>'
+        )
+        return [], empty_state(True), error, gr.update(visible=False)
+    elapsed = (time.time() - start) * 1000
+
+    counts = {"high": 0, "medium": 0, "low": 0}
+    for _, label in results:
+        if label == "HIGH RISK":
+            counts["high"] += 1
+        elif label == "MEDIUM RISK":
+            counts["medium"] += 1
+        elif label == "LOW RISK":
+            counts["low"] += 1
+
+    if sum(counts.values()) == 0:
+        return [], empty_state(True), "", gr.update(visible=False)
+
+    return (
+        to_highlight_pairs(results),
+        render_summary(counts, elapsed),
+        render_findings(results),
+        gr.update(visible=True),
     )
+
+
+def compare_all(text, min_tokens):
+    if not text or not text.strip():
+        return [], [], [], [], pd.DataFrame()
+
+    e, tb, bm, bt, df = gotcha_compare_models(text, min_tokens=min_tokens)
+    return e, tb, bm, bt, df
+
+
+# ---------------------------------------------------------------------------
+# Sample clauses
+# ---------------------------------------------------------------------------
+
+PRESET_CASES = {
+    "arbitration": (
+        "Welcome to the platform. By continuing to use our services, you expressly agree that any and all "
+        "disputes, claims, or controversies arising out of or relating to these Terms shall be resolved "
+        "exclusively by confidential, binding arbitration administered by the American Arbitration "
+        "Association, and you expressly waive any right to a trial by jury or to participate in a class "
+        "action lawsuit or class-wide arbitration."
+    ),
+    "surveillance": (
+        "We reserve the right to collect, synthesize, and monetize your precise geographic coordinates, "
+        "device identifiers, and browsing habits, and to syndicate such behavioral telemetry to commercial "
+        "third parties, ad networks, and data brokers for targeted advertising and market research "
+        "without further notice to you."
+    ),
+    "modification": (
+        "We reserve the right, at our sole and absolute discretion, to modify, amend, replace, or update "
+        "these Terms of Service at any time without prior notice. Your continued access to or use of the "
+        "service following the posting of any modifications constitutes binding and irrevocable "
+        "acceptance of the revised covenants."
+    ),
+    "indemnity": (
+        "You agree to defend, indemnify, and hold harmless the Company, its subsidiaries, affiliates, "
+        "officers, and directors from and against any and all claims, liabilities, damages, losses, "
+        "expenses, and reasonable attorneys' fees arising out of or in any way connected with your "
+        "access to or use of the Services, including any claims resulting from our own negligence."
+    ),
+    "safe": (
+        "You may request a copy of the personal data we hold about you, and you may ask us to correct or "
+        "delete it at any time. If you have questions about this policy, contact our privacy team and we "
+        "will respond within thirty days. These terms take effect on the date shown above and apply to "
+        "all users of the service."
+    ),
 }
 
-EXAMPLES = [
-    [PRESET_CASES["case_arbitration"], "electra-small", 3],
-    [PRESET_CASES["case_surveillance"], "electra-small", 3],
-    [PRESET_CASES["case_modification"], "electra-small", 3],
-    [PRESET_CASES["case_indemnity"], "electra-small", 3],
-]
+
+# ---------------------------------------------------------------------------
+# Design system
+# ---------------------------------------------------------------------------
 
 CUSTOM_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Inter:wght@400;450;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
-  --bg-deep: #090a0c;
-  --bg-surface: #111317;
-  --bg-card: #16181f;
-  --bg-card-hover: #1c1f28;
-  --bg-inset: #0c0d11;
-  --border-subtle: rgba(255, 255, 255, 0.08);
-  --border-accent: #c5a059;
-  --border-gold-glow: rgba(197, 160, 89, 0.25);
-  --ink-primary: #f5f2eb;
-  --ink-secondary: #9da5b3;
-  --ink-muted: #646c7a;
-  --ink-faint: #3e4450;
-  --accent-crimson: #be123c;
-  --accent-crimson-bg: rgba(190, 18, 60, 0.12);
-  --accent-crimson-border: rgba(190, 18, 60, 0.4);
-  --accent-amber: #b45309;
-  --accent-amber-bg: rgba(180, 83, 9, 0.12);
-  --accent-amber-border: rgba(180, 83, 9, 0.4);
-  --accent-stone: #64748b;
-  --accent-stone-bg: rgba(100, 116, 139, 0.12);
-  --accent-stone-border: rgba(100, 116, 139, 0.35);
-  --accent-cyan: #38bdf8;
-  --accent-gold: #c5a059;
-  --font-display: 'Newsreader', Georgia, serif;
-  --font-title: 'Cinzel', serif;
-  --font-ui: 'Space Grotesk', -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
+  --paper:        #fbfaf8;
+  --paper-sunk:   #f4f2ee;
+  --surface:      #ffffff;
+  --rule:         #e5e1da;
+  --rule-strong:  #d3cec4;
+
+  --ink:          #1c1a17;
+  --ink-soft:     #56514a;
+  /* 5.15:1 on paper, 4.81:1 on the sunken quote surface. The lighter
+     #6f6a60 failed AA at 3.56:1. */
+  --ink-faint:    #6f6a60;
+
+  --accent:       #a4262c;
+  --accent-wash:  #fdf3f3;
+  --focus:        #1c1a17;
+
+  --radius:       6px;
+  --gap-sm:       8px;
+  --gap:          16px;
+  --gap-lg:       36px;
+
+  --font-doc:  'Newsreader', Georgia, serif;
+  --font-ui:   'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-data: 'JetBrains Mono', ui-monospace, monospace;
+
+  /* ---- Gradio 6 theme variables ----
+     Gradio 6 scopes its theme to :root.dark and to an injected body rule that
+     outranks a plain .gradio-container selector. Overriding these at equal or
+     higher specificity is what actually forces the light surface. */
+  --bg:                    #fbfaf8;
+  --col:                   #1c1a17;
+  --background-fill-primary:   #fbfaf8;
+  --body-background-fill:      #fbfaf8;
+  --body-text-color:           #1c1a17;
+  --body-text-color-subdued:   #56514a;
+  --body-text-color-muted:     #6f6a60;
+  --neutral-1:                #1c1a17;
+  --neutral-100:              #f4f2ee;
+  --neutral-200:              #e5e1da;
+  --neutral-300:              #d3cec4;
+  --neutral-500:              #6f6a60;
+  --neutral-700:              #56514a;
+  --input-background-fill:    #ffffff;
+  --input-background-fill-hover: #ffffff;
+  --input-border-color:       #d3cec4;
+  --input-border-color-hover: #6f6a60;
+  --block-background-fill:    #ffffff;
+  --block-background-fill-soft: #f4f2ee;
+  --block-border-color:       #e5e1da;
+  --block-border-color-soft:  #e5e1da;
+  --border-primary:           #e5e1da;
+  --border-primary-accent:    #d3cec4;
+  --color-accent:             #a4262c;
+  --color-accent-soft:        #fdf3f3;
+  --color-accent-crisp:       #a4262c;
+  --button-primary-background-fill: #a4262c;
+  --button-primary-background-fill-hover: #8f1f24;
+  --button-primary-text-color: #ffffff;
+  --button-secondary-background-fill: #ffffff;
+  --button-secondary-background-fill-hover: #f4f2ee;
+  --button-secondary-text-color: #1c1a17;
+  --button-secondary-border-color: #d3cec4;
+  --checkbox-background-fill: #ffffff;
+  --slider-color: #a4262c;
+  --table-background-fill: #ffffff;
+  --table-even-background-fill: #fbfaf8;
+  --table-odd-background-fill: #ffffff;
+  --dataframe-selected-background-fill: #fdf3f3;
 }
 
-body, .gradio-container {
-  background-color: var(--bg-deep) !important;
-  background-image: 
-    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.035) 1px, transparent 0),
-    radial-gradient(ellipse 60% 350px at 50% 0%, rgba(197, 160, 89, 0.045), transparent) !important;
-  background-size: 24px 24px, 100% 100% !important;
-  color: var(--ink-primary) !important;
+html, body {
+  background: var(--paper) !important;
+  color: var(--ink) !important;
+}
+
+body.dark, :root.dark, .dark {
+  color-scheme: light;
+}
+
+/* Gradio 6 keeps the page in a `.dark` scope whose `:root.dark` rule outranks a
+   plain `:root`, so the neutral ramp has to be restated on that selector too
+   or inputs keep resolving to their hardcoded dark fills. */
+:root.dark, .dark {
+  --bg:                    #fbfaf8;
+  --col:                   #1c1a17;
+  --background-fill-primary:   #fbfaf8;
+  --body-background-fill:      #fbfaf8;
+  --body-text-color:           #1c1a17;
+  --body-text-color-subdued:   #56514a;
+  --body-text-color-muted:     #6f6a60;
+  --neutral-1:                #1c1a17;
+  --neutral-100:              #f4f2ee;
+  --neutral-200:              #e5e1da;
+  --neutral-300:              #d3cec4;
+  --neutral-500:              #6f6a60;
+  --neutral-600:              #6f6a60;
+  --neutral-700:              #56514a;
+  --neutral-800:              #3a3630;
+  --neutral-900:              #2a2724;
+  --neutral-950:              #1c1a17;
+  --input-background-fill:    #ffffff;
+  --input-background-fill-hover: #ffffff;
+  --input-border-color:       #d3cec4;
+  --input-border-color-hover: #6f6a60;
+  --block-background-fill:    #ffffff;
+  --block-background-fill-soft: #f4f2ee;
+  --block-border-color:       #e5e1da;
+  --block-border-color-soft:  #e5e1da;
+  --border-primary:           #e5e1da;
+  --color-accent:             #a4262c;
+  --color-accent-soft:        #fdf3f3;
+  --color-accent-crisp:       #a4262c;
+  --button-primary-background-fill: #a4262c;
+  --button-primary-background-fill-hover: #8f1f24;
+  --button-primary-text-color: #ffffff;
+  --button-secondary-background-fill: #ffffff;
+  --button-secondary-background-fill-hover: #f4f2ee;
+  --button-secondary-text-color: #1c1a17;
+  --button-secondary-border-color: #d3cec4;
+  --slider-color: #a4262c;
+  --table-background-fill: #ffffff;
+  --table-even-background-fill: #fbfaf8;
+  --table-odd-background-fill: #ffffff;
+  --color-scheme: light;
+}
+
+/* Gradio 6's dark scope paints .block, .form and .column with hardcoded dark
+   fills that sit behind the input and swallow it. Force the page's own
+   surfaces, then re-establish the textbox as the one white control. */
+.main, .column, .row, .form, .panel, .block,
+.form > *, .block > *, .column > *, .row > * {
+  background-color: transparent !important;
+  border-color: transparent !important;
+}
+
+.textbox, .textbox > *, .textbox textarea {
+  background-color: var(--surface) !important;
+  color: var(--ink) !important;
+}
+
+.textbox {
+  border-color: var(--rule-strong) !important;
+}
+
+/* ---------- Shell ---------- */
+
+.gradio-container {
+  background: var(--paper) !important;
+  color: var(--ink) !important;
   font-family: var(--font-ui) !important;
-  max-width: 1420px !important;
-  margin: 0 auto !important;
+  max-width: 1180px !important;
+  padding: 0 24px 72px !important;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* Masthead Header */
-.forensic-masthead {
-  border-top: 2px solid var(--border-accent);
-  border-bottom: 1px solid var(--border-subtle);
-  padding: 2.25rem 1.5rem 1.75rem 1.5rem;
-  margin-bottom: 1.75rem;
-  background: linear-gradient(180deg, rgba(22, 24, 31, 0.6) 0%, rgba(10, 11, 14, 0.8) 100%);
-  position: relative;
-}
-
-.forensic-masthead::before {
-  content: "§ 2026.IV ARCHIVE";
-  position: absolute;
-  top: 0.75rem;
-  right: 1.5rem;
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  letter-spacing: 0.18em;
-  color: var(--ink-muted);
-}
-
-.masthead-top-bar {
+.masthead {
   display: flex;
+  align-items: baseline;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 0.75rem;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: var(--gap);
+  padding: 40px 0 20px;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 32px;
 }
 
-.masthead-docket {
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  letter-spacing: 0.15em;
-  color: var(--accent-gold);
-  text-transform: uppercase;
+.masthead-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
 }
 
-.beacon-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.12em;
-  color: #10b981;
-  background: rgba(16, 185, 129, 0.08);
-  padding: 0.2rem 0.65rem;
-  border-radius: 9999px;
-  border: 1px solid rgba(16, 185, 129, 0.25);
-}
-
-.beacon-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #10b981;
-  box-shadow: 0 0 6px #10b981;
-}
-
-.masthead-title {
-  font-family: var(--font-display);
-  font-size: 3.1rem;
-  font-weight: 500;
+.wordmark {
+  font-family: var(--font-doc);
+  font-size: 1.5rem;
+  font-weight: 600;
   letter-spacing: -0.015em;
-  line-height: 1.1;
-  color: var(--ink-primary);
-  margin: 0.25rem 0 0.75rem 0;
+  color: var(--ink);
 }
 
-.masthead-title em {
-  font-style: italic;
-  color: #e2c275;
-  font-weight: 400;
-}
-
-.masthead-sub {
-  font-family: var(--font-ui);
-  font-size: 1.05rem;
-  font-weight: 400;
-  color: var(--ink-secondary);
-  max-width: 860px;
-  line-height: 1.55;
-  margin: 0;
-}
-
-/* Quick Docket Ribbon */
-.docket-shelf {
-  display: flex;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  margin-bottom: 1.5rem;
-  align-items: center;
-}
-
-.shelf-label {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  color: var(--ink-muted);
-  margin-right: 0.25rem;
-}
-
-/* Telemetry Metrics */
-.telemetry-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 0.85rem;
-  margin-bottom: 1.25rem;
-}
-
-@media (max-width: 900px) {
-  .telemetry-grid { grid-template-columns: repeat(2, 1fr); }
-  .masthead-title { font-size: 2.2rem; }
-}
-
-.telemetry-cell {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  padding: 1.1rem 1.25rem;
-  position: relative;
-  transition: border-color 0.2s ease;
-}
-
-.telemetry-cell:hover {
-  border-color: rgba(255, 255, 255, 0.16);
-}
-
-.cell-crimson { border-top: 3px solid var(--accent-crimson); }
-.cell-amber { border-top: 3px solid var(--accent-amber); }
-.cell-stone { border-top: 3px solid var(--accent-stone); }
-.cell-cyan { border-top: 3px solid var(--accent-cyan); }
-
-.cell-label {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--ink-muted);
-  margin-bottom: 0.35rem;
-}
-
-.cell-value {
-  font-family: var(--font-display);
-  font-size: 2.4rem;
-  font-weight: 600;
-  line-height: 1;
-  color: var(--ink-primary);
-  margin-bottom: 0.35rem;
-}
-
-.cell-value .unit {
-  font-family: var(--font-mono);
-  font-size: 0.9rem;
-  color: var(--ink-muted);
-  margin-left: 0.25rem;
-  font-weight: 400;
-}
-
-.cell-desc {
-  font-family: var(--font-ui);
-  font-size: 0.78rem;
-  color: var(--ink-secondary);
-}
-
-/* Dossier Finding Cards */
-.dossier-container {
-  display: flex;
-  flex-direction: column;
-  gap: 0.85rem;
-  margin-top: 1rem;
-}
-
-.dossier-header-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding-bottom: 0.5rem;
-  border-bottom: 1px solid var(--border-subtle);
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  letter-spacing: 0.12em;
-  color: var(--ink-muted);
-}
-
-.dossier-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border-subtle);
-  border-left: 3px solid var(--border-accent);
-  border-radius: 4px;
-  padding: 1.25rem;
-  transition: transform 0.15s ease, border-color 0.15s ease;
-}
-
-.dossier-card:hover {
-  background: var(--bg-card-hover);
-  border-color: var(--border-gold-glow);
-  transform: translateX(2px);
-}
-
-.card-header-row {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin-bottom: 0.75rem;
-  flex-wrap: wrap;
-}
-
-.docket-code {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.12em;
-  color: var(--accent-gold);
-  background: rgba(197, 160, 89, 0.1);
-  padding: 0.15rem 0.5rem;
-  border-radius: 3px;
-}
-
-.docket-title {
-  font-family: var(--font-ui);
-  font-size: 0.88rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--ink-primary);
-  flex: 1;
-}
-
-.dossier-badge {
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  padding: 0.2rem 0.6rem;
-  border-radius: 9999px;
-  text-transform: uppercase;
-}
-
-.badge-crimson {
-  background: var(--accent-crimson-bg);
-  color: #fda4af;
-  border: 1px solid var(--accent-crimson-border);
-}
-
-.badge-amber {
-  background: var(--accent-amber-bg);
-  color: #fcd34d;
-  border: 1px solid var(--accent-amber-border);
-}
-
-.badge-stone {
-  background: var(--accent-stone-bg);
-  color: #cbd5e1;
-  border: 1px solid var(--accent-stone-border);
-}
-
-.card-body-quote {
-  font-family: var(--font-display);
-  font-size: 1.12rem;
-  line-height: 1.5;
-  color: #f5f2eb;
-  padding: 0.75rem 1rem;
-  background: var(--bg-inset);
-  border-left: 2px solid rgba(255, 255, 255, 0.15);
-  border-radius: 2px;
-  margin-bottom: 0.75rem;
-}
-
-.quote-mark {
-  color: var(--accent-gold);
-  font-family: Georgia, serif;
-  font-size: 1.3rem;
-  line-height: 0;
-}
-
-.card-footer-analysis {
-  font-family: var(--font-ui);
+.wordmark-sub {
   font-size: 0.82rem;
-  line-height: 1.45;
-  color: var(--ink-secondary);
+  color: var(--ink-faint);
+  letter-spacing: 0.01em;
 }
 
-.footer-label {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.12em;
-  color: var(--accent-gold);
-  font-weight: 600;
-}
-
-/* Empty State / Audit Clear */
-.dossier-empty, .dossier-clear {
-  padding: 3.5rem 2rem;
-  text-align: center;
-  background: var(--bg-surface);
-  border: 1px dashed var(--border-subtle);
-  border-radius: 6px;
-}
-
-.empty-icon {
-  font-family: var(--font-display);
-  font-size: 3rem;
-  color: var(--accent-gold);
-  margin-bottom: 0.75rem;
-  opacity: 0.6;
-}
-
-.empty-title, .clear-title {
-  font-family: var(--font-display);
-  font-size: 1.35rem;
-  font-weight: 600;
-  color: var(--ink-primary);
-  margin-bottom: 0.4rem;
-}
-
-.empty-sub, .clear-desc {
-  font-family: var(--font-ui);
-  font-size: 0.9rem;
-  color: var(--ink-secondary);
-  max-width: 540px;
-  margin: 0 auto;
+.masthead-note {
+  font-size: 0.82rem;
+  color: var(--ink-faint);
+  margin: 0;
+  max-width: 34ch;
+  text-align: right;
   line-height: 1.5;
 }
 
-.clear-icon {
-  font-size: 2.2rem;
-  color: #10b981;
-  margin-bottom: 0.5rem;
+/* ---------- Tabs ---------- */
+
+/* Gradio 6 renders tabs as .tabs > .tab-wrapper > .tab-container. The old
+   .gr-tabs / .tab-nav names belong to Gradio 4 and match nothing here. */
+.tabs > .tab-wrapper > .tab-container {
+  display: flex !important;
+  gap: 26px !important;
+  border-bottom: 1px solid var(--rule) !important;
+  margin-bottom: 32px !important;
+  background: transparent !important;
+  flex-wrap: wrap;
 }
 
-/* Button Refinement */
-.audit-execute-btn {
-  background: linear-gradient(180deg, #1c1f26 0%, #12141a 100%) !important;
-  color: #f5f2eb !important;
-  border: 1px solid var(--border-accent) !important;
-  font-family: var(--font-mono) !important;
-  font-size: 0.85rem !important;
-  letter-spacing: 0.12em !important;
-  text-transform: uppercase !important;
-  padding: 0.85rem 1.5rem !important;
-  border-radius: 4px !important;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+.tabs > .tab-wrapper > .tab-container > button {
+  background: none !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 8px 0 12px !important;
+  border-bottom: 2px solid transparent !important;
+  margin-bottom: -1px !important;
+  font-family: var(--font-ui) !important;
+  font-size: 0.9rem !important;
+  font-weight: 450 !important;
+  color: var(--ink-faint) !important;
+  transition: color 120ms ease, border-color 120ms ease;
 }
 
-.audit-execute-btn:hover {
-  background: linear-gradient(180deg, #242730 0%, #171920 100%) !important;
-  border-color: #e2c275 !important;
-  box-shadow: 0 0 16px rgba(197, 160, 89, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
-  transform: translateY(-1px) !important;
+.tabs > .tab-wrapper > .tab-container > button:hover {
+  color: var(--ink-soft) !important;
 }
 
-.preset-chip-btn {
-  background: var(--bg-surface) !important;
-  color: var(--ink-secondary) !important;
-  border: 1px solid var(--border-subtle) !important;
-  font-family: var(--font-mono) !important;
-  font-size: 0.72rem !important;
-  letter-spacing: 0.08em !important;
-  padding: 0.4rem 0.85rem !important;
-  border-radius: 3px !important;
-  transition: all 0.15s ease !important;
+.tabs > .tab-wrapper > .tab-container > button:focus-visible {
+  outline: 2px solid var(--focus) !important;
+  outline-offset: 3px !important;
+  border-radius: 2px;
 }
 
-.preset-chip-btn:hover {
-  color: var(--ink-primary) !important;
-  border-color: var(--border-accent) !important;
-  background: var(--bg-card) !important;
+.tabs > .tab-wrapper > .tab-container > button.selected {
+  color: var(--ink) !important;
+  font-weight: 600 !important;
+  border-bottom-color: var(--accent) !important;
 }
 
-/* Gradio Component Reskinning */
+/* ---------- Field labels ---------- */
+/* Gradio paints label + hint text from block_info_text_color, which reads
+   near-white on this light surface unless it is restated. */
+label, label > span,
+.block > label, .block > label > span,
+.block_label, .block_info, .block_info > span,
+span.block_label, span.block_info,
+span.has-info {
+  color: var(--ink-soft) !important;
+  font-weight: 500 !important;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+  opacity: 1 !important;
+}
+
+/* The hint under a field label is secondary, not primary. */
+span.has-info + span,
+.block .has-info:not(:only-child) {
+  color: var(--ink-faint) !important;
+  font-weight: 400 !important;
+}
+
+.block > label, .block > label > span, .block_label {
+  color: var(--ink) !important;
+}
+
+.block_info, .block_info > span, .block_info_text {
+  color: var(--ink-faint) !important;
+  font-weight: 400 !important;
+  font-size: 0.74rem !important;
+}
+
+/* ---------- Inputs ---------- */
+
 .gr-textbox textarea, .gr-textbox input {
-  background-color: var(--bg-surface) !important;
-  color: var(--ink-primary) !important;
-  font-family: var(--font-mono) !important;
-  font-size: 0.88rem !important;
-  line-height: 1.6 !important;
-  border: 1px solid var(--border-subtle) !important;
-  border-radius: 4px !important;
+  background: var(--surface) !important;
+  color: var(--ink) !important;
+  border: 1px solid var(--rule-strong) !important;
+  border-radius: var(--radius) !important;
+  font-family: var(--font-doc) !important;
+  font-size: 1.02rem !important;
+  line-height: 1.65 !important;
+  padding: 14px 16px !important;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
 .gr-textbox textarea:focus, .gr-textbox input:focus {
-  border-color: var(--border-accent) !important;
-  box-shadow: 0 0 0 1px var(--border-accent) !important;
+  border-color: var(--focus) !important;
+  box-shadow: 0 0 0 3px rgba(28, 26, 23, 0.08) !important;
+  outline: none !important;
 }
 
-.gr-dropdown {
-  background-color: var(--bg-surface) !important;
-  border-radius: 4px !important;
-}
-
-.gr-tabs {
-  border-bottom: 1px solid var(--border-subtle) !important;
-  margin-bottom: 1.5rem !important;
-}
-
-.gr-tab-nav button {
-  font-family: var(--font-mono) !important;
-  font-size: 0.8rem !important;
-  letter-spacing: 0.1em !important;
-  text-transform: uppercase !important;
-  color: var(--ink-muted) !important;
-  padding: 0.75rem 1.25rem !important;
-  border-bottom: 2px solid transparent !important;
-}
-
-.gr-tab-nav button.selected {
-  color: var(--ink-primary) !important;
-  border-bottom-color: var(--border-accent) !important;
-}
-
-/* HighlightedText Typography */
-.highlighted-text {
-  font-family: var(--font-display) !important;
-  font-size: 1.15rem !important;
-  line-height: 1.75 !important;
-  background: var(--bg-surface) !important;
-  padding: 1.25rem !important;
-  border-radius: 4px !important;
-  border: 1px solid var(--border-subtle) !important;
-}
-
-.highlighted-text span[style*="background"] {
-  border-radius: 3px !important;
-  padding: 0.15rem 0.4rem !important;
+.gr-textbox label, .gr-dropdown label, .gr-slider label, .gr-checkbox label {
+  font-family: var(--font-ui) !important;
+  font-size: 0.78rem !important;
   font-weight: 500 !important;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3) !important;
+  color: var(--ink-soft) !important;
+  margin-bottom: 6px !important;
 }
 
-/* Comparison Badges */
-.model-spec-badge {
-  font-family: var(--font-mono);
+.gr-textbox .info, .gr-slider .info, .gr-dropdown .info {
+  font-size: 0.74rem !important;
+  color: var(--ink-faint) !important;
+}
+
+.gr-dropdown > div, .gr-dropdown .wrap {
+  background: var(--surface) !important;
+  border: 1px solid var(--rule-strong) !important;
+  border-radius: var(--radius) !important;
+}
+
+input[type=range] { accent-color: var(--accent) !important; }
+
+/* ---------- Buttons ---------- */
+
+.gr-button {
+  font-family: var(--font-ui) !important;
+  font-weight: 500 !important;
+  font-size: 0.88rem !important;
+  border-radius: var(--radius) !important;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.btn-primary {
+  background: var(--accent) !important;
+  border: 1px solid var(--accent) !important;
+  color: #fff !important;
+}
+.btn-primary:hover { background: #8f1f24 !important; border-color: #8f1f24 !important; }
+
+.btn-secondary {
+  background: var(--surface) !important;
+  border: 1px solid var(--rule-strong) !important;
+  color: var(--ink-soft) !important;
+}
+.btn-secondary:hover { border-color: var(--ink-faint) !important; color: var(--ink) !important; }
+
+.gr-button:focus-visible, button:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 2px solid var(--focus) !important;
+  outline-offset: 2px !important;
+}
+
+/* ---------- Presets ---------- */
+
+.preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-sm);
+  margin-bottom: 20px;
+}
+
+.preset-note {
+  font-size: 0.74rem;
+  color: var(--ink-faint);
+  margin: 0 0 8px;
+}
+
+/* ---------- Document ---------- */
+
+.doc-pane {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 24px 26px;
+  min-height: 320px;
+}
+
+.highlighted-text {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  font-family: var(--font-doc) !important;
+  font-size: 1.02rem !important;
+  line-height: 1.72 !important;
+  color: var(--ink-soft) !important;
+}
+
+/* Token spans are inline; let the browser wrap between them rather than
+   letting the component hyphenate words at its own boundaries. */
+.highlighted-text .token,
+.highlighted-text .token-container,
+.highlighted-text .text,
+.highlighted-text .textfield,
+.highlighted-text span[class*="token"],
+.highlighted-text span[class*="text"] {
+  white-space: normal !important;
+  word-break: normal !important;
+  overflow-wrap: break-word !important;
+}
+
+/* Gradio stamps a "processing | Ns" line under the panel on slow runs.
+   The summary line already reports latency, so this is redundant. */
+.highlighted-text .progress-text,
+.compare-grid .highlighted-text .progress-text {
+  display: none !important;
+}
+
+.highlighted-text span {
+  border-radius: 2px !important;
+  padding: 1px 2px !important;
+  color: var(--ink) !important;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.doc-label {
   font-size: 0.72rem;
-  letter-spacing: 0.1em;
+  font-weight: 600;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  padding: 0.35rem 0.85rem;
-  border-radius: 3px;
-  display: inline-block;
-  margin-bottom: 0.65rem;
-  border: 1px solid var(--border-subtle);
+  color: var(--ink-faint);
+  margin: 0 0 10px;
 }
 
-.spec-electra { background: rgba(56, 189, 248, 0.12); color: #7dd3fc; border-color: rgba(56, 189, 248, 0.3); }
-.spec-tinybert { background: rgba(197, 160, 89, 0.12); color: #e2c275; border-color: rgba(197, 160, 89, 0.3); }
-.spec-mini { background: rgba(168, 85, 247, 0.12); color: #c084fc; border-color: rgba(168, 85, 247, 0.3); }
-.spec-tiny { background: rgba(16, 185, 129, 0.12); color: #6ee7b7; border-color: rgba(16, 185, 129, 0.3); }
+.legend {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding-top: 16px;
+  margin-top: 18px;
+  border-top: 1px solid var(--rule);
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+}
+
+.legend-swatch {
+  width: 22px;
+  height: 14px;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+/* ---------- Summary ---------- */
+
+.summary {
+  padding: 4px 0 20px;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 20px;
+}
+
+.summary-line {
+  font-family: var(--font-doc);
+  font-size: 1.28rem;
+  line-height: 1.4;
+  color: var(--ink);
+  margin: 0 0 6px;
+  text-wrap: balance;
+}
+
+.summary-meta {
+  font-family: var(--font-data);
+  font-size: 0.74rem;
+  color: var(--ink-faint);
+  margin: 0;
+}
+
+/* ---------- Findings ---------- */
+
+.findings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.finding {
+  padding: 18px 0 18px 18px;
+  border-left: 2px solid var(--ink);
+  border-bottom: 1px solid var(--rule);
+}
+
+.finding:last-child { border-bottom: none; padding-bottom: 4px; }
+
+.finding-head {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.finding-num {
+  font-family: var(--font-data);
+  font-size: 0.74rem;
+  color: var(--ink);
+  border-bottom: 1.5px solid var(--ink);
+  padding-bottom: 1px;
+  flex-shrink: 0;
+}
+
+.finding-title {
+  font-family: var(--font-ui);
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.35;
+}
+
+.finding-family {
+  font-size: 0.76rem;
+  color: var(--ink);
+  opacity: 0.72;
+  margin-top: 1px;
+}
+
+.finding-quote {
+  margin: 0 0 10px;
+  padding: 10px 14px;
+  background: var(--paper-sunk);
+  border-radius: 3px;
+  font-family: var(--font-doc);
+  font-size: 0.98rem;
+  line-height: 1.62;
+  color: var(--ink-soft);
+}
+
+.finding-detail {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--ink-soft);
+  max-width: 62ch;
+}
+
+/* ---------- Empty / notice ---------- */
+
+.empty {
+  padding: 40px 0;
+  max-width: 46ch;
+}
+
+.empty-title {
+  font-family: var(--font-doc);
+  font-size: 1.16rem;
+  font-weight: 500;
+  color: var(--ink);
+  margin: 0 0 8px;
+}
+
+.empty-body {
+  font-size: 0.88rem;
+  line-height: 1.62;
+  color: var(--ink-soft);
+  margin: 0;
+}
+
+.notice {
+  border-left: 2px solid var(--accent);
+  padding-left: 18px;
+}
+.notice-error .empty-title { color: var(--accent); }
+
+/* ---------- Ledger ---------- */
+
+.ledger-intro {
+  max-width: 62ch;
+  margin: 0 0 32px;
+}
+
+.ledger-intro h2 {
+  font-family: var(--font-doc);
+  font-size: 1.4rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 8px;
+  color: var(--ink);
+}
+
+.ledger-intro p {
+  font-size: 0.9rem;
+  line-height: 1.65;
+  color: var(--ink-soft);
+  margin: 0;
+}
+
+.gr-dataframe {
+  border: 1px solid var(--rule) !important;
+  border-radius: var(--radius) !important;
+  overflow: hidden;
+}
+
+.gr-dataframe table {
+  font-family: var(--font-data) !important;
+  font-size: 0.8rem !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.gr-dataframe th {
+  background: var(--paper-sunk) !important;
+  color: var(--ink-soft) !important;
+  font-weight: 500 !important;
+  border-bottom: 1px solid var(--rule-strong) !important;
+}
+
+.gr-dataframe td {
+  border-bottom: 1px solid var(--rule) !important;
+  color: var(--ink-soft) !important;
+}
+
+.hpo-block {
+  margin-top: 40px;
+  padding-top: 32px;
+  border-top: 1px solid var(--rule);
+}
+
+.hpo-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--gap);
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.hpo-head h3 {
+  font-family: var(--font-doc);
+  font-size: 1.12rem;
+  font-weight: 600;
+  margin: 0;
+  color: var(--ink);
+}
+
+.hpo-head p {
+  font-size: 0.82rem;
+  color: var(--ink-faint);
+  margin: 0;
+}
+
+.compare-grid > div { min-width: 0; }
+
+/* Four equal lanes on desktop so every model gets the same reading width;
+   they stay equal as the viewport narrows. */
+.compare-grid {
+  display: grid !important;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  gap: 20px !important;
+  align-items: start !important;
+}
+
+.compare-grid > * { min-width: 0 !important; }
+
+@media (max-width: 1100px) {
+  .compare-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+}
+
+@media (max-width: 640px) {
+  .compare-grid { grid-template-columns: minmax(0, 1fr) !important; }
+}
+
+/* The comparison panels use the same HighlightedText treatment as the main
+   workspace, so they need the same wrapping fix even though they do not carry
+   the .highlighted-text elem class. */
+.compare-grid .token,
+.compare-grid .token-container,
+.compare-grid .text,
+.compare-grid .textfield,
+.compare-grid span[class*="token"] {
+  white-space: normal !important;
+  word-break: normal !important;
+  overflow-wrap: break-word !important;
+  font-family: var(--font-doc) !important;
+  font-size: 0.95rem !important;
+  line-height: 1.7 !important;
+}
+
+.compare-hint {
+  font-size: 0.78rem;
+  color: var(--ink-faint);
+  margin: 0 0 12px;
+}
+
+.model-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.model-name {
+  font-family: var(--font-ui);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.model-f1 {
+  font-family: var(--font-data);
+  font-size: 0.76rem;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 900px) {
+  .gradio-container { padding: 0 16px 56px !important; }
+  .masthead { padding: 28px 0 18px; margin-bottom: 24px; }
+  .masthead-note { text-align: left; max-width: none; }
+  .doc-pane { padding: 18px; min-height: 0; }
+  .highlighted-text { font-size: 1rem !important; }
+  .tabs > .tab-wrapper > .tab-container { gap: 18px !important; }
+}
+
+/* ---------- Motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
 """
 
-# Version-adaptive Blocks instantiation
+
+# ---------------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------------
+
 gr_version_str = getattr(gr, "__version__", "4.0.0")
 gr_major = int(gr_version_str.split(".")[0]) if gr_version_str and gr_version_str[0].isdigit() else 4
 
+# Paper surface, reviewer's red ink, and the same tokens applied to Gradio's
+# dark variants so the app reads identically whichever mode the browser picks.
+PAPER = "#fbfaf8"
+SURFACE = "#ffffff"
+INK = "#1c1a17"
+INK_SOFT = "#56514a"
+INK_FAINT = "#6f6a60"
+RULE = "#e5e1da"
+RULE_STRONG = "#d3cec4"
+SUNK = "#f4f2ee"
+ACCENT = "#a4262c"
+ACCENT_HOVER = "#8f1f24"
+
+
+def build_theme():
+    """Configure Gradio's token set for both light and dark appearances.
+
+    Gradio 6 ships component stylesheets after the custom CSS block, so
+    setting the theme at construction time is what actually wins the cascade.
+    """
+    theme = gr.themes.Base()
+    ramp = {
+        "neutral_50": SURFACE,
+        "neutral_100": SUNK,
+        "neutral_200": RULE,
+        "neutral_300": RULE_STRONG,
+        "neutral_400": "#b5afa4",
+        "neutral_500": INK_FAINT,
+        "neutral_600": "#6f6a60",
+        "neutral_700": INK_SOFT,
+        "neutral_800": "#3a3630",
+        "neutral_900": "#2a2724",
+        "neutral_950": INK,
+    }
+    for name, value in ramp.items():
+        setattr(theme, name, value)
+        dark_name = f"{name}_dark"
+        if hasattr(theme, dark_name):
+            setattr(theme, dark_name, value)
+
+    pairs = {
+        "body_background_fill": PAPER,
+        "body_text_color": INK,
+        "body_text_color_subdued": INK_SOFT,
+        "background_fill_primary": PAPER,
+        "background_fill_secondary": SUNK,
+        "block_background_fill": SURFACE,
+        "block_background_fill_soft": SUNK,
+        "block_border_color": RULE,
+        "block_border_color_soft": RULE,
+        "input_background_fill": SURFACE,
+        "input_background_fill_hover": SURFACE,
+        "input_background_fill_focus": SURFACE,
+        "input_border_color": RULE_STRONG,
+        "input_border_color_hover": INK_FAINT,
+        "button_primary_background_fill": ACCENT,
+        "button_primary_background_fill_hover": ACCENT_HOVER,
+        "button_primary_text_color": SURFACE,
+        "button_secondary_background_fill": SURFACE,
+        "button_secondary_background_fill_hover": SUNK,
+        "button_secondary_text_color": INK,
+        "button_secondary_border_color": RULE_STRONG,
+        "table_background_fill": SURFACE,
+        "table_even_background_fill": PAPER,
+        "table_odd_background_fill": SURFACE,
+        "color_accent": ACCENT,
+        "color_accent_soft": "#fdf3f3",
+        "checkbox_background_fill": SURFACE,
+        "block_label_text_color": INK,
+        "block_info_text_color": INK_FAINT,
+    }
+    for name, value in pairs.items():
+        if hasattr(theme, name):
+            setattr(theme, name, value)
+        dark_name = f"{name}_dark"
+        if hasattr(theme, dark_name):
+            setattr(theme, dark_name, value)
+
+    for name, value in {
+        "block_label_text_size": "0.78rem",
+        "block_label_text_weight": 500,
+        "block_info_text_size": "0.74rem",
+        "block_info_text_weight": 400,
+    }.items():
+        if hasattr(theme, name):
+            setattr(theme, name, value)
+        dark_name = f"{name}_dark"
+        if hasattr(theme, dark_name):
+            setattr(theme, dark_name, value)
+
+    return theme
+
+
+theme = build_theme()
+
 if gr_major >= 6:
     blocks_kwargs = {}
-    launch_kwargs = {"theme": gr.themes.Base(), "css": CUSTOM_CSS}
+    launch_kwargs = {"theme": theme, "css": CUSTOM_CSS}
 else:
-    blocks_kwargs = {"theme": gr.themes.Base(), "css": CUSTOM_CSS}
+    blocks_kwargs = {"theme": theme, "css": CUSTOM_CSS}
     launch_kwargs = {}
 
 with gr.Blocks(**blocks_kwargs) as demo:
-    
-    # Injected style fallback ensures styling in all Gradio versions & embeds
+
     gr.HTML(f"<style>{CUSTOM_CSS}</style>", visible=False)
-    
-    # Architectural Masthead
+
+    # Masthead — identity only, no telemetry theatre
     gr.HTML("""
-    <div class="forensic-masthead">
-        <div class="masthead-top-bar">
-            <div class="masthead-docket">DOCKET 2026.IV // SPEC: BIO-TAG SEQUENCE DISCRIMINATOR</div>
-            <div class="beacon-status">
-                <span class="beacon-dot"></span>
-                <span>DISCRIMINATOR ARMED & OPERATIONAL</span>
-            </div>
-        </div>
-        <h1 class="masthead-title">The Toxic Fine Print <em>Inspector</em></h1>
-        <p class="masthead-sub">Forensic NLP sequence labeling for adhesion contracts. Dissecting forced arbitration, surveillance telemetry brokerage, unilateral amendment covenants, and asymmetric liability shields in consumer Terms of Service.</p>
-    </div>
+    <header class="masthead">
+      <div class="masthead-brand">
+        <span class="wordmark">Gotcha</span>
+        <span class="wordmark-sub">clause extractor</span>
+      </div>
+      <p class="masthead-note">BIO token classification over terms of service, privacy policies, and EULAs.</p>
+    </header>
     """)
-    
+
     with gr.Tabs():
-        
-        # TAB 1: Single Model Forensic Extractor
-        with gr.TabItem("§ Forensic Clause Inspector"):
-            
-            # Quick Docket Shelf (Preset cases)
+
+        # -------------------------------------------------------------------
+        # Tab 1 — the working surface
+        # -------------------------------------------------------------------
+        with gr.TabItem("Review a contract"):
+
+            gr.HTML('<p class="preset-note">Try an example:</p>')
+            with gr.Row(elem_classes=["preset-row"]):
+                btn_arb = gr.Button("Forced arbitration", elem_classes=["btn-secondary"])
+                btn_surv = gr.Button("Data brokerage", elem_classes=["btn-secondary"])
+                btn_mut = gr.Button("Unilateral change", elem_classes=["btn-secondary"])
+                btn_ind = gr.Button("Indemnification", elem_classes=["btn-secondary"])
+                btn_safe = gr.Button("Clean policy", elem_classes=["btn-secondary"])
+
             with gr.Row():
-                with gr.Column(scale=12):
-                    gr.HTML('<div class="docket-shelf"><span class="shelf-label">HISTORICAL DOCKET PRESETS:</span></div>')
-                    with gr.Row():
-                        btn_case_arb = gr.Button("Case I · Forced Arbitration", size="sm", elem_classes=["preset-chip-btn"])
-                        btn_case_surv = gr.Button("Case II · Surveillance Brokerage", size="sm", elem_classes=["preset-chip-btn"])
-                        btn_case_mut = gr.Button("Case III · Unilateral Mutation", size="sm", elem_classes=["preset-chip-btn"])
-                        btn_case_ind = gr.Button("Case IV · Indemnification Shield", size="sm", elem_classes=["preset-chip-btn"])
-            
-            with gr.Row():
+                # Input column
                 with gr.Column(scale=5):
                     text_input = gr.Textbox(
-                        lines=12,
-                        label="Contractual Text Intake (Terms of Service / Privacy Policy)",
-                        placeholder="Paste contractual clauses, privacy policy declarations, or user agreement sections here...",
-                        value=PRESET_CASES["case_arbitration"]
+                        lines=15,
+                        label="Contract text",
+                        placeholder="Paste the terms of service, privacy policy, or EULA to review...",
+                        elem_classes=["contract-input"]
                     )
                     with gr.Row():
                         model_dropdown = gr.Dropdown(
                             choices=AVAILABLE_MODELS,
                             value="electra-small",
-                            label="Neural Architecture",
-                            info="Select fine-tuned transformer discriminator"
+                            label="Model",
+                            info="Which fine-tuned classifier to run"
                         )
                         min_tokens_slider = gr.Slider(
                             minimum=1,
                             maximum=5,
                             step=1,
                             value=3,
-                            label="Risk Token Sensitivity Threshold",
-                            info="Minimum risk sub-words to trip clause flag"
+                            label="Sensitivity",
+                            info="Risk sub-words required to flag a clause"
                         )
-                    analyze_btn = gr.Button("[ EXECUTE FORENSIC AUDIT ➔ ]", variant="primary", elem_classes=["audit-execute-btn"])
-                    
+                    analyze_btn = gr.Button("Review contract", variant="primary", elem_classes=["btn-primary"])
+
+                # Output column
                 with gr.Column(scale=7):
-                    stats_output = gr.HTML("""
-                    <div class="telemetry-grid">
-                        <div class="telemetry-cell cell-crimson">
-                            <div class="cell-label">Critical Threats</div>
-                            <div class="cell-value">—</div>
-                            <div class="cell-desc">Arbitration & data syndication</div>
-                        </div>
-                        <div class="telemetry-cell cell-amber">
-                            <div class="cell-label">Adverse Covenants</div>
-                            <div class="cell-value">—</div>
-                            <div class="cell-desc">Silent modifications & tracking</div>
-                        </div>
-                        <div class="telemetry-cell cell-stone">
-                            <div class="cell-label">Cautionary Terms</div>
-                            <div class="cell-value">—</div>
-                            <div class="cell-desc">As-is warranty & liability disclaimers</div>
-                        </div>
-                        <div class="telemetry-cell cell-cyan">
-                            <div class="cell-label">Inference Velocity</div>
-                            <div class="cell-value">—</div>
-                            <div class="cell-desc">Neural forward-pass runtime</div>
-                        </div>
-                    </div>
-                    """)
-                    
-                    highlighted_output = gr.HighlightedText(
-                        label="Annotated Legal Agreement",
+                    summary_output = gr.HTML(empty_state(False))
+                    findings_output = gr.HTML("")
+                    annotated = gr.HighlightedText(
+                        label="Annotated text",
+                        interactive=False,
                         combine_adjacent=False,
+                        show_whitespaces=False,
+                        show_legend=False,
+                        show_inline_category=False,
+                        visible=False,
                         color_map=COLOR_MAP,
                         elem_classes=["highlighted-text"]
                     )
-                    
-                    dossier_output = gr.HTML("""
-                    <div class="dossier-empty">
-                        <div class="empty-icon">§</div>
-                        <div class="empty-title">Ready for Forensic Audit</div>
-                        <div class="empty-sub">Click '[ EXECUTE FORENSIC AUDIT ➔ ]' to run neural token discrimination across the submitted agreement.</div>
+                    gr.HTML("""
+                    <div class="legend">
+                      <div class="legend-item"><span class="legend-swatch" style="background:#fde8ea"></span>High risk</div>
+                      <div class="legend-item"><span class="legend-swatch" style="background:#fdf0dd"></span>Medium risk</div>
+                      <div class="legend-item"><span class="legend-swatch" style="background:#eef1f4"></span>Low risk</div>
                     </div>
                     """)
-            
-            # Wire up preset buttons
-            btn_case_arb.click(fn=lambda: PRESET_CASES["case_arbitration"], outputs=text_input)
-            btn_case_surv.click(fn=lambda: PRESET_CASES["case_surveillance"], outputs=text_input)
-            btn_case_mut.click(fn=lambda: PRESET_CASES["case_modification"], outputs=text_input)
-            btn_case_ind.click(fn=lambda: PRESET_CASES["case_indemnity"], outputs=text_input)
-            
-            # Wire up single analyzer
+
+            btn_arb.click(lambda: PRESET_CASES["arbitration"], outputs=text_input)
+            btn_surv.click(lambda: PRESET_CASES["surveillance"], outputs=text_input)
+            btn_mut.click(lambda: PRESET_CASES["modification"], outputs=text_input)
+            btn_ind.click(lambda: PRESET_CASES["indemnity"], outputs=text_input)
+            btn_safe.click(lambda: PRESET_CASES["safe"], outputs=text_input)
+
             analyze_btn.click(
                 fn=analyze_single,
                 inputs=[text_input, model_dropdown, min_tokens_slider],
-                outputs=[highlighted_output, stats_output, dossier_output]
+                outputs=[annotated, summary_output, findings_output, annotated]
             )
 
-        # TAB 2: Comparative Architecture Benchmarking
-        with gr.TabItem("⚖ Comparative Model Matrix"):
+        # -------------------------------------------------------------------
+        # Tab 2 — model ledger
+        # -------------------------------------------------------------------
+        with gr.TabItem("Model ledger"):
+
             gr.HTML("""
-            <div style="margin-bottom: 1.25rem;">
-                <div style="font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.12em; color: var(--accent-gold); margin-bottom: 0.35rem;">
-                    CROSS-MODEL VERIFICATION PROTOCOL
-                </div>
-                <div style="font-family: var(--font-ui); font-size: 0.95rem; color: var(--ink-secondary);">
-                    Run identical legal covenants through all four fine-tuned backbones in a single pass to contrast sensitivity thresholds and inference latencies.
-                </div>
+            <div class="ledger-intro">
+              <h2>Four classifiers, measured</h2>
+              <p>Each model was fine-tuned on the same legal corpus with inverse-sqrt class weighting,
+              then tuned with Optuna. Scores below are from the held-out test split, which contains
+              human-labeled data only.</p>
             </div>
             """)
-            
-            with gr.Row():
-                comp_text_input = gr.Textbox(
-                    lines=4,
-                    label="Contractual Covenants for Comparative Discrimination",
-                    value="We reserve the right to modify these terms at any time without notice. In the event of a dispute, you waive your right to a class action lawsuit and agree to binding arbitration.",
-                    placeholder="Enter clauses to benchmark across all four models..."
+
+            ledger_rows = []
+            for m in AVAILABLE_MODELS:
+                s = MODELS_SUMMARY_MAP.get(m, {})
+                ledger_rows.append([
+                    s.get("name", m),
+                    s.get("params", "—"),
+                    fmt_pct(s.get("test_precision")),
+                    fmt_pct(s.get("test_recall")),
+                    fmt_pct(s.get("test_f1")),
+                    fmt_pct(s.get("test_accuracy")),
+                    str(s.get("total_trials", 0)),
+                ])
+
+            gr.Dataframe(
+                value=ledger_rows,
+                headers=["Model", "Parameters", "Precision", "Recall", "F1", "Accuracy", "Optuna trials"],
+                datatype=["str", "str", "str", "str", "str", "str", "str"],
+                interactive=False,
+                wrap=True
+            )
+
+            if len(METRICS_DF) > 0:
+                with gr.Row():
+                    with gr.Column():
+                        gr.LinePlot(
+                            value=METRICS_DF,
+                            x="Epoch",
+                            y="Validation F1",
+                            color="Model",
+                            title="Validation F1 by epoch",
+                            tooltip=["Model", "Epoch", "Validation F1"]
+                        )
+                    with gr.Column():
+                        gr.LinePlot(
+                            value=METRICS_DF,
+                            x="Epoch",
+                            y="Training loss",
+                            color="Model",
+                            title="Training loss by epoch",
+                            tooltip=["Model", "Epoch", "Training loss"]
+                        )
+
+            with gr.Column(elem_classes=["hpo-block"]):
+                gr.HTML("""
+                <div class="hpo-head">
+                  <h3>Optuna trials</h3>
+                  <p>Ranked by validation F1</p>
+                </div>
+                """)
+
+                hpo_model_select = gr.Dropdown(
+                    choices=AVAILABLE_MODELS,
+                    value="electra-small",
+                    label="Model",
+                    info="Inspect a single model's hyperparameter search"
                 )
-            
-            with gr.Row():
-                comp_tokens_slider = gr.Slider(
-                    minimum=1,
-                    maximum=5,
-                    step=1,
-                    value=3,
-                    label="Min Risk Token Threshold"
+
+                hpo_trials_table = gr.Dataframe(
+                    value=OPTUNA_TRIALS_MAP.get("electra-small", pd.DataFrame()),
+                    interactive=False,
+                    wrap=True,
+                    visible=True
                 )
-                compare_btn = gr.Button("[ RUN CROSS-ARCHITECTURE BENCHMARK ➔ ]", variant="primary", elem_classes=["audit-execute-btn"])
-                
-            gr.HTML("<div style='font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.12em; color: var(--ink-muted); margin: 1.5rem 0 0.75rem 0;'>ANNOTATION OUTPUT COMPARISON</div>")
-            
+
+                def on_hpo_model_change(m_key):
+                    s = MODELS_SUMMARY_MAP.get(m_key, {})
+                    hp = s.get("best_hp", {})
+                    lr = hp.get("learning_rate")
+                    wd = hp.get("weight_decay")
+                    frozen = hp.get("num_frozen_layers", 0)
+                    line = (
+                        f"{s.get('name', m_key)} · learning rate "
+                        f"{f'{lr:.2e}' if isinstance(lr, (int, float)) else '—'} · "
+                        f"weight decay {f'{wd:.4f}' if isinstance(wd, (int, float)) else '—'} · "
+                        f"{frozen} frozen layers · {s.get('total_trials', 0)} trials"
+                    )
+                    return line, OPTUNA_TRIALS_MAP.get(m_key, pd.DataFrame())
+
+                hpo_subline = gr.Markdown(value=on_hpo_model_change("electra-small")[0])
+
+                hpo_model_select.change(
+                    fn=on_hpo_model_change,
+                    inputs=[hpo_model_select],
+                    outputs=[hpo_subline, hpo_trials_table]
+                )
+
+        # -------------------------------------------------------------------
+        # Tab 3 — cross-model comparison
+        # -------------------------------------------------------------------
+        with gr.TabItem("Compare models"):
+
+            gr.HTML("""
+            <div class="ledger-intro">
+              <h2>Same text, four opinions</h2>
+              <p>Run one contract through every fine-tuned backbone to see where they disagree.
+              ELECTRA-Small leads on F1; BERT-Tiny trades precision for the highest recall.</p>
+            </div>
+            """)
+
+            comp_text_input = gr.Textbox(
+                lines=5,
+                label="Contract text",
+                value="We reserve the right to modify these terms at any time without notice. In the event "
+                      "of a dispute, you waive your right to a class action lawsuit and agree to binding arbitration.",
+            )
+
             with gr.Row():
+                with gr.Column(scale=1):
+                    comp_tokens_slider = gr.Slider(
+                        minimum=1,
+                        maximum=5,
+                        step=1,
+                        value=3,
+                        label="Sensitivity",
+                        info="Risk sub-words required to flag a clause"
+                    )
+                with gr.Column(scale=1):
+                    compare_btn = gr.Button("Run all four models", variant="primary", elem_classes=["btn-primary"])
+
+            def compare_cards(text, min_tokens):
+                e, tb, bm, bt, df = compare_all(text, min_tokens)
+                return e, tb, bm, bt, df
+
+            gr.HTML('<p class="compare-hint">Run the benchmark to populate these panels.</p>')
+            with gr.Row(elem_classes=["compare-grid"]):
                 with gr.Column():
-                    gr.HTML("<div class='model-spec-badge spec-electra'>ELECTRA-Small (Discriminator · 13.5M)</div>")
-                    out_electra = gr.HighlightedText(label="ELECTRA Output", combine_adjacent=False, color_map=COLOR_MAP, elem_classes=["highlighted-text"])
+                    gr.HTML('<div class="model-head"><span class="model-name">ELECTRA-Small</span><span class="model-f1">F1 79.7%</span></div>')
+                    out_electra = gr.HighlightedText(combine_adjacent=False, show_inline_category=False, show_whitespaces=False, show_legend=False, color_map=COLOR_MAP)
                 with gr.Column():
-                    gr.HTML("<div class='model-spec-badge spec-tinybert'>TinyBERT (4-Layer Distilled · 14.3M)</div>")
-                    out_tinybert = gr.HighlightedText(label="TinyBERT Output", combine_adjacent=False, color_map=COLOR_MAP, elem_classes=["highlighted-text"])
-                    
-            with gr.Row():
+                    gr.HTML('<div class="model-head"><span class="model-name">TinyBERT</span><span class="model-f1">F1 77.6%</span></div>')
+                    out_tinybert = gr.HighlightedText(combine_adjacent=False, show_inline_category=False, show_whitespaces=False, show_legend=False, color_map=COLOR_MAP)
                 with gr.Column():
-                    gr.HTML("<div class='model-spec-badge spec-mini'>BERT-Mini (4-Layer 256D · 11.1M)</div>")
-                    out_mini = gr.HighlightedText(label="BERT-Mini Output", combine_adjacent=False, color_map=COLOR_MAP, elem_classes=["highlighted-text"])
+                    gr.HTML('<div class="model-head"><span class="model-name">BERT-Mini</span><span class="model-f1">F1 68.4%</span></div>')
+                    out_mini = gr.HighlightedText(combine_adjacent=False, show_inline_category=False, show_whitespaces=False, show_legend=False, color_map=COLOR_MAP)
                 with gr.Column():
-                    gr.HTML("<div class='model-spec-badge spec-tiny'>BERT-Tiny (2-Layer 128D · 4.4M)</div>")
-                    out_tiny = gr.HighlightedText(label="BERT-Tiny Output", combine_adjacent=False, color_map=COLOR_MAP, elem_classes=["highlighted-text"])
-            
-            gr.HTML("<div style='font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.12em; color: var(--ink-muted); margin: 1.5rem 0 0.75rem 0;'>PERFORMANCE TELEMETRY MATRIX</div>")
+                    gr.HTML('<div class="model-head"><span class="model-name">BERT-Tiny</span><span class="model-f1">F1 75.0%</span></div>')
+                    out_tiny = gr.HighlightedText(combine_adjacent=False, show_inline_category=False, show_whitespaces=False, show_legend=False, color_map=COLOR_MAP)
+
             comparison_df = gr.Dataframe(
                 headers=["Model", "Validation F1 (Best)", "Parameters", "Disk Size", "Risks Detected", "Latency (ms)"],
                 datatype=["str", "str", "str", "str", "number", "str"],
-                label="Benchmark Metrics Ledger"
+                label="Benchmark metrics",
+                interactive=False,
+                wrap=True
             )
-            
+
             compare_btn.click(
-                fn=compare_models,
+                fn=compare_cards,
                 inputs=[comp_text_input, comp_tokens_slider],
                 outputs=[out_electra, out_tinybert, out_mini, out_tiny, comparison_df]
             )
 
-        # TAB 3: Model Training History & Architecture
-        with gr.TabItem("📊 Technical Ledger & Evaluation"):
-            gr.HTML("""
-            <div style="margin-bottom: 1.25rem;">
-                <div style="font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.12em; color: var(--accent-gold); margin-bottom: 0.35rem;">
-                    MODEL ARCHITECTURE EVALUATION LEDGER
-                </div>
-                <div style="font-family: var(--font-ui); font-size: 0.95rem; color: var(--ink-secondary);">
-                    Validation histories across hyperparameter optimization trials (Optuna) and inverse-sqrt class-weighted loss training.
-                </div>
-            </div>
-            """)
-            
-            leaderboard_rows = []
-            for m in AVAILABLE_MODELS:
-                summary = MODELS_SUMMARY_MAP.get(m, {})
-                leaderboard_rows.append([
-                    summary.get("name", m.upper()),
-                    summary.get("peak_f1", "—"),
-                    summary.get("optuna_f1", "—"),
-                    summary.get("params", "—"),
-                    summary.get("size", "—"),
-                    summary.get("desc", "")
-                ])
-                
-            gr.Dataframe(
-                value=leaderboard_rows,
-                headers=["Architecture", "Peak Val F1", "Optuna Best F1", "Parameters", "Footprint", "Design Rationale"],
-                datatype=["str", "str", "str", "str", "str", "str"],
-                interactive=False
-            )
-            
-            with gr.Row():
-                f1_plot = gr.LinePlot(
-                    value=METRICS_DF,
-                    x="Epoch",
-                    y="Validation F1",
-                    color="Model",
-                    title="Validation F1 Progression vs. Epochs",
-                    tooltip=["Model", "Epoch", "Validation F1"]
-                )
-                
-                loss_plot = gr.LinePlot(
-                    value=METRICS_DF,
-                    x="Epoch",
-                    y="Training Loss",
-                    color="Model",
-                    title="Weighted Cross-Entropy Loss vs. Epochs",
-                    tooltip=["Model", "Epoch", "Training Loss"]
-                )
-
-            gr.HTML("""
-            <div style="margin: 2rem 0 1rem 0;">
-                <div style="font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.12em; color: var(--accent-gold); margin-bottom: 0.35rem;">
-                    OPTUNA HYPERPARAMETER OPTIMIZATION & TRIAL LEDGER
-                </div>
-                <div style="font-family: var(--font-ui); font-size: 0.95rem; color: var(--ink-secondary);">
-                    Select any transformer backbone to inspect its hyperparameter trial evaluations, search trajectories, and optimal convergence parameters.
-                </div>
-            </div>
-            """)
-
-            with gr.Row():
-                hpo_model_select = gr.Dropdown(
-                    choices=AVAILABLE_MODELS,
-                    value="electra-small",
-                    label="Select Architecture for HPO Deep-Dive",
-                    info="Filter trial ledger and optimal hyperparameters"
-                )
-
-            hpo_card_output = gr.HTML(value=render_hpo_card("electra-small"))
-
-            hpo_trials_table = gr.Dataframe(
-                value=OPTUNA_TRIALS_MAP.get("electra-small", pd.DataFrame()),
-                headers=["Trial", "Val F1", "Learning Rate", "Weight Decay", "Batch Size", "Warmup Ratio", "Frozen Layers"],
-                label="Optuna Hyperparameter Trial Rankings (Sorted by Validation F1)",
-                interactive=False
-            )
-
-            def on_hpo_model_change(m_key):
-                return render_hpo_card(m_key), OPTUNA_TRIALS_MAP.get(m_key, pd.DataFrame())
-
-            hpo_model_select.change(
-                fn=on_hpo_model_change,
-                inputs=[hpo_model_select],
-                outputs=[hpo_card_output, hpo_trials_table]
-            )
-            
-            gr.HTML("""
-            <div style="background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1.5rem; margin-top: 1.5rem;">
-                <div style="font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.15em; color: var(--accent-gold); margin-bottom: 0.5rem;">
-                    FORENSIC ARCHITECTURE NOTES
-                </div>
-                <div style="font-family: var(--font-ui); font-size: 0.88rem; line-height: 1.6; color: var(--ink-secondary);">
-                    <p>• <strong>Token Classification Protocol:</strong> Models classify sub-words into <code>B-RISK</code>, <code>I-RISK</code>, and <code>O</code> tags using an inverse-sqrt class-weighted cross-entropy loss (<code>[0.38, 4.70, 1.00]</code>), preventing minority gotcha boundaries from being submerged by neutral background text.</p>
-                    <p>• <strong>Symmetric Context Augmentation:</strong> Prevents artificial positional priors by balancing gotcha placement across sequence boundaries (40% prefix, 40% suffix, 20% embedded).</p>
-                    <p>• <strong>Heuristic Interception:</strong> Pro-user consumer rights (GDPR/CCPA access, erasure, deletion) are safeguarded from false alarms via contextual negation analysis.</p>
-                </div>
-            </div>
-            """)
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860, **launch_kwargs)

@@ -73,12 +73,19 @@ BOILERPLATE_PATTERNS = [
     r"we\s+restrict\s+access\s+to\s+personal\s+information\s+collected.*to\s+our\s+employees",
     r"please\s+note\s+that\s+we\s+have\s+a\s+separate\s+privacy\s+disclosure\s+statement\s+to\s+address\s+our\s+protocols.*located\s+here",
     r"children\s+under\s+13", r"younger\s+than\s+13", r"receive\s+parental\s+consent",
-    r"privacy\s+policy\s+effective\s+date"
+    r"privacy\s+policy\s+effective\s+date",
+    r"these\s+terms\s+(take\s+effect|apply|are\s+effective)",
+    r"(effective|applies)\s+as\s+of\s+the\s+date\s+(shown|indicated|listed)",
+    r"by\s+using\s+(this|our)\s+(service|site|platform).{0,40}(you\s+agree|constitutes)",
+    r"if\s+you\s+(do\s+not\s+)?agree\s+with\s+(these|any\s+part\s+of\s+these)",
 ]
 
 KEYWORDS_PRO_USER = [
-    r"you\s+(may|can)\s+(access|correct|request\s+deletion|delete|port|object)",
-    r"request\s+(that\s+we\s+stop|the\s+deletion|deletion|access\s+to)",
+    # Allow filler between the permission verb and the right it grants,
+    # e.g. "you may request a copy of" / "you may ask us to correct".
+    r"you\s+(may|can)\s+(also\s+)?(request|ask\s+us\s+to|be\s+able\s+to|choose\s+to)?\s*(access|correct|request|copy|obtain|delete|deletion|port|object|rectify|erase|update|restrict|opt)",
+    r"you\s+(may|can)\s+(ask|request)\s+(us\s+)?(to\s+)?(delete|correct|remove|erase|rectify|provide|disclose|stop)",
+    r"(request|ask)\s+(that\s+we\s+stop|the\s+deletion|deletion|access\s+to)",
     r"freely\s+visit\s+our\s+(website|platform)\s+anonymously",
     r"without\s+being\s+required\s+to\s+provide\s+us\s+with\s+any\s+personal\s+information",
     r"rights\s+related\s+to\s+the\s+european\s+union",
@@ -90,8 +97,18 @@ KEYWORDS_PRO_USER = [
     r"right\s+to\s+know\s+what\s+personal\s+information",
 ]
 
+# Risk treatments for the annotated-document surface.
+# Red is reserved for risk ink (the way a reviewer marks up a contract);
+# the calmer bands recede so the flagged text carries the eye.
 COLOR_MAP = {
-    "HIGH RISK": "#be123c",
-    "MEDIUM RISK": "#b45309",
+    "HIGH RISK": "#fde8ea",
+    "MEDIUM RISK": "#fdf0dd",
+    "LOW RISK": "#eef1f4"
+}
+
+# Left-edge severity ink for the findings list.
+RISK_INK = {
+    "HIGH RISK": "#a4262c",
+    "MEDIUM RISK": "#9a6700",
     "LOW RISK": "#64748b"
 }

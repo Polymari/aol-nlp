@@ -4,6 +4,7 @@ from .constants import (
     AVAILABLE_MODELS,
     MODEL_META,
     COLOR_MAP,
+    RISK_INK,
     label2id,
     id2label
 )
@@ -25,6 +26,7 @@ __all__ = [
     "AVAILABLE_MODELS",
     "MODEL_META",
     "COLOR_MAP",
+    "RISK_INK",
     "label2id",
     "id2label",
     "clean_text_pipeline",

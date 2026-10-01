@@ -1,8 +1,6 @@
 torch
 transformers
-gradio>=4.44.0,<5.0.0
-starlette<0.28.0
+gradio>=6.0.0,<7.0.0
 pandas
 nltk
 ftfy
-huggingface_hub<0.25.0

@@ -41,6 +41,22 @@ def test_boilerplate_preserves_high_risk_clauses():
     assert clean_boilerplate_header("DISPUTE RESOLUTION AND CLASS ACTION WAIVER") is False
 
 
+def test_pro_user_permission_with_filler():
+    """Regression: rights phrased with filler between the verb and the right
+    ('you may request a copy of', 'you may ask us to correct') must still be
+    suppressed, otherwise clean privacy policies raise false alarms."""
+    s1 = "You may request a copy of the personal data we hold about you."
+    s2 = "You may ask us to correct or delete it at any time."
+    assert check_pro_user_override(s1) is True
+    assert check_pro_user_override(s2) is True
+
+
+def test_boilerplate_effective_date_and_assent():
+    """Standard assent boilerplate is not a risky clause."""
+    assert clean_boilerplate_header("These terms take effect on the date shown above.") is True
+    assert clean_boilerplate_header("If you do not agree with these terms, do not use the service.") is True
+
+
 def test_high_risk_keywords():
     assert has_high_risk_keyword("We reserve the right to modify these terms.") is True
     assert has_high_risk_keyword("Any dispute must be settled through arbitration.") is True
