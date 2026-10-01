@@ -824,8 +824,14 @@ input[type=range] { accent-color: var(--accent) !important; }
 
 /* ---------- Findings ---------- */
 
+/* The findings are an <ol> only for semantics; the visible number lives in
+   .finding-num, so the native marker has to be suppressed explicitly. */
+.findings,
+.findings > li {
+  list-style: none !important;
+}
+
 .findings {
-  list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
