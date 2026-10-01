@@ -133,6 +133,15 @@ def fmt_pct(value, digits=1):
     return "—"
 
 
+# Model names and test F1 for the comparison lanes, read from the metrics
+# ledger so the header cannot drift from what the ledger reports.
+COMPARE_PANELS = [
+    (MODEL_META.get(m, {}).get("name", m).replace(" (Fine-tuned)", ""), fmt_pct(
+        MODELS_SUMMARY_MAP.get(m, {}).get("test_f1")))
+    for m in AVAILABLE_MODELS
+]
+
+
 # ---------------------------------------------------------------------------
 # Clause taxonomy
 # ---------------------------------------------------------------------------
@@ -268,12 +277,14 @@ def to_highlight_pairs(results):
 def analyze_single(text, model_name, min_tokens):
     """Run the classifier and return every output the workspace needs.
 
-    Returns (annotated_text, summary_html, findings_html, annotated_update)
-    where the update reveals the annotated panel only when there is
-    something to show.
+    Returns (annotated_text, summary_html, findings_html, label_update,
+    text_update). The two updates reveal the annotated-text heading and
+    panel together, and only when there is something to show.
     """
+    hidden = (gr.update(visible=False), gr.update(visible=False))
+
     if not text or not text.strip():
-        return [], empty_state(False), "", gr.update(visible=False)
+        return [], empty_state(False), "", *hidden
 
     start = time.time()
     try:
@@ -283,7 +294,7 @@ def analyze_single(text, model_name, min_tokens):
             f'<div class="notice notice-error"><p class="empty-title">Analysis failed</p>'
             f'<p class="empty-body">{e}</p></div>'
         )
-        return [], empty_state(True), error, gr.update(visible=False)
+        return [], empty_state(True), error, *hidden
     elapsed = (time.time() - start) * 1000
 
     counts = {"high": 0, "medium": 0, "low": 0}
@@ -296,13 +307,14 @@ def analyze_single(text, model_name, min_tokens):
             counts["low"] += 1
 
     if sum(counts.values()) == 0:
-        return [], empty_state(True), "", gr.update(visible=False)
+        return [], empty_state(True), "", *hidden
 
+    shown = (gr.update(visible=True), gr.update(visible=True))
     return (
         to_highlight_pairs(results),
         render_summary(counts, elapsed),
         render_findings(results),
-        gr.update(visible=True),
+        *shown,
     )
 
 
@@ -702,19 +714,84 @@ input[type=range] { accent-color: var(--accent) !important; }
   outline-offset: 2px !important;
 }
 
-/* ---------- Presets ---------- */
-
-.preset-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--gap-sm);
-  margin-bottom: 20px;
+/* ---------- Control row ---------- */
+/* Model and sensitivity sit in one column so each keeps a single-line
+   label; stacking them also stops them reading as competing peers. */
+.control-row {
+  gap: 20px !important;
+  align-items: start !important;
 }
 
-.preset-note {
-  font-size: 0.74rem;
+.control-row > * {
+  min-width: 0 !important;
+}
+
+/* Gradio's slider header collapses to a narrow column, which wrapped the
+   "Sensitivity" label and its hint onto three lines each. Give the header
+   the full track width. The hint is allowed to wrap rather than clip. */
+.control-row .wrap,
+.control-row .head {
+  width: 100% !important;
+}
+
+.control-row label,
+.control-row .head > label {
+  white-space: nowrap !important;
+}
+
+.control-row .info-text,
+.control-row .block_info {
+  max-width: none !important;
+}
+
+/* ---------- Presets ----------
+   These are a convenience, not the main event. They render as small text
+   buttons on a hairline row so the review button keeps the accent. */
+.preset-bar {
+  display: flex !important;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding-bottom: 18px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.preset-label {
+  font-size: 0.78rem;
   color: var(--ink-faint);
-  margin: 0 0 8px;
+  white-space: nowrap;
+  margin-inline-end: 10px;
+}
+
+.preset-btn {
+  background: none !important;
+  border: 1px solid transparent !important;
+  color: var(--ink-soft) !important;
+  font-size: 0.8rem !important;
+  font-weight: 450 !important;
+  padding: 5px 10px !important;
+  min-height: 0 !important;
+  width: auto !important;
+  flex: 0 0 auto !important;
+  border-radius: 4px !important;
+  box-shadow: none !important;
+  text-decoration: underline;
+  text-decoration-color: var(--rule-strong);
+  text-underline-offset: 3px;
+}
+
+.preset-btn:hover {
+  background: var(--paper-sunk) !important;
+  border-color: var(--rule-strong) !important;
+  color: var(--ink) !important;
+  text-decoration-color: transparent;
+}
+
+.preset-btn:focus-visible {
+  outline: 2px solid var(--focus) !important;
+  outline-offset: 2px !important;
 }
 
 /* ---------- Document ---------- */
@@ -750,10 +827,23 @@ input[type=range] { accent-color: var(--accent) !important; }
   overflow-wrap: break-word !important;
 }
 
-/* Gradio stamps a "processing | Ns" line under the panel on slow runs.
-   The summary line already reports latency, so this is redundant. */
-.highlighted-text .progress-text,
-.compare-grid .highlighted-text .progress-text {
+/* Gradio marks an HTML container "pending" once it has been toggled visible
+   and never clears the class, which pins it at opacity 0.2. The legend is
+   static content, so it is never actually pending. */
+.html-container.pending {
+  opacity: 1 !important;
+}
+
+/* Gradio stamps a "processing | Ns" line and an edit affordance on every
+   run. The summary already reports latency, and a read-only annotation view
+   has nothing to edit. These render in sibling blocks rather than inside
+   .highlighted-text, so they are matched on their own class names. */
+.progress-text,
+[class*="progress-text"] {
+  display: none !important;
+}
+
+.wrap.full.translucent {
   display: none !important;
 }
 
@@ -774,6 +864,27 @@ input[type=range] { accent-color: var(--accent) !important; }
   margin: 0 0 10px;
 }
 
+/* Legend rides on the same line as the heading it explains, so it reads as
+   a key to that panel rather than a floating strip of loose swatches. */
+.doc-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--gap);
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--rule);
+}
+
+/* The key reads as a caption under the annotated prose, not a floating
+   strip, so it keeps its own top margin rather than the panel divider. */
+.legend-key {
+  padding-top: 12px;
+  margin-top: 12px;
+  border-top: 1px solid var(--rule);
+}
+
 .legend {
   display: flex;
   gap: 18px;
@@ -788,14 +899,14 @@ input[type=range] { accent-color: var(--accent) !important; }
   align-items: center;
   gap: 7px;
   font-size: 0.78rem;
-  color: var(--ink-soft);
+  font-weight: 500;
+  color: var(--ink);
 }
 
 .legend-swatch {
   width: 22px;
-  height: 14px;
+  height: 3px;
   border-radius: 2px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
 }
 
 /* ---------- Summary ---------- */
@@ -872,8 +983,7 @@ input[type=range] { accent-color: var(--accent) !important; }
 
 .finding-family {
   font-size: 0.76rem;
-  color: var(--ink);
-  opacity: 0.72;
+  color: var(--ink-faint);
   margin-top: 1px;
 }
 
@@ -1206,7 +1316,7 @@ with gr.Blocks(**blocks_kwargs) as demo:
         <span class="wordmark">Gotcha</span>
         <span class="wordmark-sub">clause extractor</span>
       </div>
-      <p class="masthead-note">BIO token classification over terms of service, privacy policies, and EULAs.</p>
+      <p class="masthead-note">Reads a contract and marks the clauses that cost you rights.</p>
     </header>
     """)
 
@@ -1217,13 +1327,13 @@ with gr.Blocks(**blocks_kwargs) as demo:
         # -------------------------------------------------------------------
         with gr.TabItem("Review a contract"):
 
-            gr.HTML('<p class="preset-note">Try an example:</p>')
-            with gr.Row(elem_classes=["preset-row"]):
-                btn_arb = gr.Button("Forced arbitration", elem_classes=["btn-secondary"])
-                btn_surv = gr.Button("Data brokerage", elem_classes=["btn-secondary"])
-                btn_mut = gr.Button("Unilateral change", elem_classes=["btn-secondary"])
-                btn_ind = gr.Button("Indemnification", elem_classes=["btn-secondary"])
-                btn_safe = gr.Button("Clean policy", elem_classes=["btn-secondary"])
+            with gr.Row(elem_classes=["preset-bar"]):
+                gr.HTML('<span class="preset-label">Load an example</span>')
+                btn_arb = gr.Button("Forced arbitration", size="sm", elem_classes=["preset-btn"])
+                btn_surv = gr.Button("Data brokerage", size="sm", elem_classes=["preset-btn"])
+                btn_mut = gr.Button("Unilateral change", size="sm", elem_classes=["preset-btn"])
+                btn_ind = gr.Button("Indemnification", size="sm", elem_classes=["preset-btn"])
+                btn_safe = gr.Button("Clean policy", size="sm", elem_classes=["preset-btn"])
 
             with gr.Row():
                 # Input column
@@ -1234,12 +1344,15 @@ with gr.Blocks(**blocks_kwargs) as demo:
                         placeholder="Paste the terms of service, privacy policy, or EULA to review...",
                         elem_classes=["contract-input"]
                     )
-                    with gr.Row():
+                    # Stacked rather than side by side: at this column width the
+                    # slider label wrapped to three lines and the two controls
+                    # looked like competing peers instead of settings.
+                    with gr.Row(elem_classes=["control-row"]):
                         model_dropdown = gr.Dropdown(
                             choices=AVAILABLE_MODELS,
                             value="electra-small",
                             label="Model",
-                            info="Which fine-tuned classifier to run"
+                            info="Classifier to run"
                         )
                         min_tokens_slider = gr.Slider(
                             minimum=1,
@@ -1247,7 +1360,7 @@ with gr.Blocks(**blocks_kwargs) as demo:
                             step=1,
                             value=3,
                             label="Sensitivity",
-                            info="Risk sub-words required to flag a clause"
+                            info="Risk sub-words to flag"
                         )
                     analyze_btn = gr.Button("Review contract", variant="primary", elem_classes=["btn-primary"])
 
@@ -1256,7 +1369,6 @@ with gr.Blocks(**blocks_kwargs) as demo:
                     summary_output = gr.HTML(empty_state(False))
                     findings_output = gr.HTML("")
                     annotated = gr.HighlightedText(
-                        label="Annotated text",
                         interactive=False,
                         combine_adjacent=False,
                         show_whitespaces=False,
@@ -1266,13 +1378,15 @@ with gr.Blocks(**blocks_kwargs) as demo:
                         color_map=COLOR_MAP,
                         elem_classes=["highlighted-text"]
                     )
-                    gr.HTML("""
-                    <div class="legend">
-                      <div class="legend-item"><span class="legend-swatch" style="background:#fde8ea"></span>High risk</div>
-                      <div class="legend-item"><span class="legend-swatch" style="background:#fdf0dd"></span>Medium risk</div>
-                      <div class="legend-item"><span class="legend-swatch" style="background:#eef1f4"></span>Low risk</div>
+                    # The key uses the same severity ink as the finding rails, so
+                    # the legend and the marks it explains cannot drift apart.
+                    annotated_label = gr.HTML(f"""
+                    <div class="legend legend-key">
+                      <div class="legend-item"><span class="legend-swatch" style="background:{RISK_INK['HIGH RISK']}"></span>High</div>
+                      <div class="legend-item"><span class="legend-swatch" style="background:{RISK_INK['MEDIUM RISK']}"></span>Medium</div>
+                      <div class="legend-item"><span class="legend-swatch" style="background:{RISK_INK['LOW RISK']}"></span>Low</div>
                     </div>
-                    """)
+                    """, visible=False)
 
             btn_arb.click(lambda: PRESET_CASES["arbitration"], outputs=text_input)
             btn_surv.click(lambda: PRESET_CASES["surveillance"], outputs=text_input)
@@ -1283,7 +1397,7 @@ with gr.Blocks(**blocks_kwargs) as demo:
             analyze_btn.click(
                 fn=analyze_single,
                 inputs=[text_input, model_dropdown, min_tokens_slider],
-                outputs=[annotated, summary_output, findings_output, annotated]
+                outputs=[annotated, summary_output, findings_output, annotated_label, annotated]
             )
 
         # -------------------------------------------------------------------
@@ -1406,37 +1520,46 @@ with gr.Blocks(**blocks_kwargs) as demo:
                       "of a dispute, you waive your right to a class action lawsuit and agree to binding arbitration.",
             )
 
-            with gr.Row():
-                with gr.Column(scale=1):
-                    comp_tokens_slider = gr.Slider(
-                        minimum=1,
-                        maximum=5,
-                        step=1,
-                        value=3,
-                        label="Sensitivity",
-                        info="Risk sub-words required to flag a clause"
-                    )
-                with gr.Column(scale=1):
-                    compare_btn = gr.Button("Run all four models", variant="primary", elem_classes=["btn-primary"])
+            with gr.Row(elem_classes=["control-row"]):
+                comp_tokens_slider = gr.Slider(
+                    minimum=1,
+                    maximum=5,
+                    step=1,
+                    value=3,
+                    label="Sensitivity",
+                    info="Risk sub-words to flag"
+                )
+                compare_btn = gr.Button("Run all four models", variant="primary", elem_classes=["btn-primary"])
 
             def compare_cards(text, min_tokens):
-                e, tb, bm, bt, df = compare_all(text, min_tokens)
-                return e, tb, bm, bt, df
+                panels = compare_all(text, min_tokens)
+                shown = [gr.update(visible=True)] * len(COMPARE_PANELS)
+                return *panels, *shown
 
             gr.HTML('<p class="compare-hint">Run the benchmark to populate these panels.</p>')
+
+            # Panels start hidden so the resting state is a sentence rather
+            # than four empty frames, and reveal together after a run.
+            compare_outputs = []
             with gr.Row(elem_classes=["compare-grid"]):
-                with gr.Column():
-                    gr.HTML('<div class="model-head"><span class="model-name">ELECTRA-Small</span><span class="model-f1">F1 79.7%</span></div>')
-                    out_electra = gr.HighlightedText(combine_adjacent=False, show_inline_category=False, show_whitespaces=False, show_legend=False, color_map=COLOR_MAP)
-                with gr.Column():
-                    gr.HTML('<div class="model-head"><span class="model-name">TinyBERT</span><span class="model-f1">F1 77.6%</span></div>')
-                    out_tinybert = gr.HighlightedText(combine_adjacent=False, show_inline_category=False, show_whitespaces=False, show_legend=False, color_map=COLOR_MAP)
-                with gr.Column():
-                    gr.HTML('<div class="model-head"><span class="model-name">BERT-Mini</span><span class="model-f1">F1 68.4%</span></div>')
-                    out_mini = gr.HighlightedText(combine_adjacent=False, show_inline_category=False, show_whitespaces=False, show_legend=False, color_map=COLOR_MAP)
-                with gr.Column():
-                    gr.HTML('<div class="model-head"><span class="model-name">BERT-Tiny</span><span class="model-f1">F1 75.0%</span></div>')
-                    out_tiny = gr.HighlightedText(combine_adjacent=False, show_inline_category=False, show_whitespaces=False, show_legend=False, color_map=COLOR_MAP)
+                for name, f1 in COMPARE_PANELS:
+                    with gr.Column():
+                        gr.HTML(
+                            f'<div class="model-head"><span class="model-name">{name}</span>'
+                            f'<span class="model-f1">F1 {f1}</span></div>'
+                        )
+                        compare_outputs.append(
+                            gr.HighlightedText(
+                                interactive=False,
+                                combine_adjacent=False,
+                                show_inline_category=False,
+                                show_whitespaces=False,
+                                show_legend=False,
+                                visible=False,
+                                color_map=COLOR_MAP,
+                                elem_classes=["highlighted-text"],
+                            )
+                        )
 
             comparison_df = gr.Dataframe(
                 headers=["Model", "Validation F1 (Best)", "Parameters", "Disk Size", "Risks Detected", "Latency (ms)"],
@@ -1449,7 +1572,7 @@ with gr.Blocks(**blocks_kwargs) as demo:
             compare_btn.click(
                 fn=compare_cards,
                 inputs=[comp_text_input, comp_tokens_slider],
-                outputs=[out_electra, out_tinybert, out_mini, out_tiny, comparison_df]
+                outputs=[*compare_outputs, comparison_df, *compare_outputs],
             )
 
 
