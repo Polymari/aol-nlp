@@ -519,14 +519,23 @@ body.dark, :root.dark, .dark {
 
 /* ---------- Shell ---------- */
 
+/* gradio-app is the flex parent, so the container itself must fill it and
+   the width cap belongs on an inner wrapper. Capping the container directly
+   makes it a shrink-to-fit flex item and it collapses to content width. */
 .gradio-container {
   background: var(--paper) !important;
   color: var(--ink) !important;
   font-family: var(--font-ui) !important;
-  max-width: 1180px !important;
-  padding: 0 24px 72px !important;
+  max-width: none !important;
+  padding: 0 32px 72px !important;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+.gradio-container > .main {
+  max-width: 1480px;
+  margin-inline: auto;
+  width: 100%;
 }
 
 .masthead {
@@ -714,6 +723,36 @@ input[type=range] { accent-color: var(--accent) !important; }
   outline-offset: 2px !important;
 }
 
+/* The contract textarea is the tallest thing in the input column, so it
+   grows to fill the column instead of leaving dead space beneath it.
+   Gradio's column is a plain flex item, so the stretch has to be enabled
+   on it explicitly before the child can grow into it. */
+.row:not(.preset-bar) > .column:has(.contract-input) {
+  display: flex;
+  flex-direction: column;
+}
+
+.contract-input {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Gradio inserts .input-container between the block and the textarea, and it
+   defaults to flex: 0 1 auto, which stops the textarea from growing into the
+   column. It has to grow too for the stretch to reach the field. */
+.contract-input .input-container {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.contract-input textarea {
+  flex: 1 1 auto;
+  min-height: 340px;
+}
+
 /* ---------- Control row ---------- */
 /* Model and sensitivity sit in one column so each keeps a single-line
    label; stacking them also stops them reading as competing peers. */
@@ -756,6 +795,7 @@ input[type=range] { accent-color: var(--accent) !important; }
   padding-bottom: 18px;
   margin-bottom: 4px;
   border-bottom: 1px solid var(--rule);
+  max-width: 980px;
 }
 
 .preset-label {
@@ -1181,14 +1221,30 @@ input[type=range] { accent-color: var(--accent) !important; }
 
 @media (max-width: 900px) {
   .gradio-container { padding: 0 16px 56px !important; }
+  .gradio-container > .main { max-width: none; }
   .masthead { padding: 28px 0 18px; margin-bottom: 24px; }
   .masthead-note { text-align: left; max-width: none; }
   .doc-pane { padding: 18px; min-height: 0; }
   .highlighted-text { font-size: 1rem !important; }
   .tabs > .tab-wrapper > .tab-container { gap: 18px !important; }
+  .preset-bar { max-width: none; }
 }
 
 /* ---------- Motion ---------- */
+
+/* Gradio's component stylesheet is injected after this block and sets
+   flex-grow on the textarea, so the mobile reset has to come last to win.
+
+   The selector is deliberately short: Gradio rewrites custom CSS with a
+   scoped prefix and will happily produce an unmatchable descendant chain
+   if the rule names .gradio-container itself. */
+@media (max-width: 900px) {
+  .contract-input textarea {
+    flex: 0 0 auto !important;
+    min-height: 0 !important;
+    height: 220px !important;
+  }
+}
 
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
@@ -1339,7 +1395,12 @@ with gr.Blocks(**blocks_kwargs) as demo:
                 # Input column
                 with gr.Column(scale=5):
                     text_input = gr.Textbox(
-                        lines=15,
+                        # Gradio writes the row count to an inline height on the
+                        # textarea, which outranks any CSS height. A taller row
+                        # count is therefore what actually makes the field fill
+                        # the column; the flex rules below only stop it from
+                        # being clipped when the column shrinks on mobile.
+                        lines=26,
                         label="Contract text",
                         placeholder="Paste the terms of service, privacy policy, or EULA to review...",
                         elem_classes=["contract-input"]
