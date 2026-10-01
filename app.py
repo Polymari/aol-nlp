@@ -199,14 +199,13 @@ def render_findings(results):
     items = []
     for i, (segment, label) in enumerate(flagged, 1):
         info = categorize_gotcha(segment)
-        ink = RISK_INK.get(label, RISK_INK["LOW RISK"])
         items.append(f"""
-        <li class="finding" style="--ink: {ink}">
+        <li class="finding">
           <div class="finding-head">
             <span class="finding-num">{i:02d}</span>
-            <div>
+            <div class="finding-titles">
               <div class="finding-title">{info['title']}</div>
-              <div class="finding-family">{info['family']} · {label.replace(' RISK', '').title()} risk</div>
+              <div class="finding-family">{info['family']} &middot; <span class="sev sev-{label.split()[0].lower()}">{label}</span></div>
             </div>
           </div>
           <blockquote class="finding-quote">{segment}</blockquote>
@@ -216,17 +215,36 @@ def render_findings(results):
     return f'<ol class="findings">{"".join(items)}</ol>'
 
 
+FINDINGS_HEAD = """
+<div class="doc-head findings-head">
+  <p class="doc-label">What each clause costs you</p>
+</div>
+"""
+
+
+def render_findings_block(results):
+    """Findings list with its own section heading."""
+    body = render_findings(results)
+    return f"{FINDINGS_HEAD}{body}" if body else ""
+
+
 def render_summary(counts, elapsed_ms):
     """A single honest sentence about what was found, plus secondary metadata."""
     total = counts["high"] + counts["medium"] + counts["low"]
     if total == 0:
         return ""
-    parts = [f"{counts['high']} high risk", f"{counts['medium']} medium", f"{counts['low']} low"]
+    # Only name the bands that actually fired; a "1 high risk, 0 medium, 0 low"
+    # line reads like a broken report.
+    parts = [
+        f"{counts[b]} {word}"
+        for b, word in (("high", "high risk"), ("medium", "medium"), ("low", "low"))
+        if counts[b]
+    ]
     device = get_inference_device().type.upper()
     return f"""
     <div class="summary">
-      <p class="summary-line">{total} flagged clause{'' if total == 1 else 's'}: {', '.join(parts)}.</p>
-      <p class="summary-meta">{elapsed_ms:.0f} ms · {device} · BIO token classification</p>
+      <p class="summary-line">{total} flagged clause{'' if total == 1 else 's'}.</p>
+      <p class="summary-meta">{" · ".join(parts)} &middot; {elapsed_ms:.0f} ms on {device}</p>
     </div>
     """
 
@@ -313,7 +331,7 @@ def analyze_single(text, model_name, min_tokens):
     return (
         to_highlight_pairs(results),
         render_summary(counts, elapsed),
-        render_findings(results),
+        render_findings_block(results),
         *shown,
     )
 
@@ -704,12 +722,24 @@ input[type=range] { accent-color: var(--accent) !important; }
   transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
+/* The primary action is an inked button, not a slab of saturated colour.
+   A full-width crimson block out-shouts the document it is meant to serve;
+   dark ink at the same weight reads as decisive and lets red stay reserved
+   for risk. It also stops stretching the full column width. */
 .btn-primary {
-  background: var(--accent) !important;
-  border: 1px solid var(--accent) !important;
-  color: #fff !important;
+  background: var(--ink) !important;
+  border: 1px solid var(--ink) !important;
+  color: var(--paper) !important;
+  font-weight: 500 !important;
+  width: auto !important;
+  align-self: flex-start !important;
+  padding: 0.6rem 1.5rem !important;
 }
-.btn-primary:hover { background: #8f1f24 !important; border-color: #8f1f24 !important; }
+
+.btn-primary:hover {
+  background: #322d27 !important;
+  border-color: #322d27 !important;
+}
 
 .btn-secondary {
   background: var(--surface) !important;
@@ -730,6 +760,13 @@ input[type=range] { accent-color: var(--accent) !important; }
 .row:not(.preset-bar) > .column:has(.contract-input) {
   display: flex;
   flex-direction: column;
+}
+
+/* The primary action sits at the foot of the input column, so the field above
+   it absorbs the slack rather than leaving a void under the button. */
+.row:not(.preset-bar) > .column:has(.contract-input) > .block:has(.btn-primary) {
+  margin-top: auto;
+  padding-top: 20px;
 }
 
 .contract-input {
@@ -848,10 +885,24 @@ input[type=range] { accent-color: var(--accent) !important; }
   background: transparent !important;
   border: none !important;
   padding: 0 !important;
+  /* Gradio tags a scale-less component "auto-margin" and centres it, which
+     pushed the marked text ~105px right of the heading above it. */
+  margin-left: 0 !important;
+  margin-right: 0 !important;
   font-family: var(--font-doc) !important;
-  font-size: 1.02rem !important;
-  line-height: 1.72 !important;
+  font-size: 1.05rem !important;
+  line-height: 1.7 !important;
   color: var(--ink-soft) !important;
+  /* Cap the measure. Without this the annotated prose runs to ~140
+     characters per line in a wide column, which is unreadable. */
+  max-width: 68ch !important;
+}
+
+/* Flagged spans carry a wash plus a red underline, so severity is legible
+   as a shape and not only as a pale tint. */
+.highlighted-text span[style*="background"] {
+  box-shadow: inset 0 -2px 0 rgba(164, 38, 44, 0.45);
+  padding: 2px 1px !important;
 }
 
 /* Token spans are inline; let the browser wrap between them rather than
@@ -925,6 +976,30 @@ input[type=range] { accent-color: var(--accent) !important; }
   border-top: 1px solid var(--rule);
 }
 
+/* Section heading that carries its own rule, used above the marked text and
+   above the findings. Both are labelled sections in the result column, not
+   loose caption text floating over body copy. */
+.doc-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--gap);
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.doc-head .doc-label { margin: 0; }
+
+/* The findings are a second section in the same column, so they need their
+   own air and a rule to separate them from the marked text above. */
+.findings-head {
+  margin-top: 40px;
+  padding-top: 28px;
+  border-top: 1px solid var(--rule);
+}
+
 .legend {
   display: flex;
   gap: 18px;
@@ -951,6 +1026,12 @@ input[type=range] { accent-color: var(--accent) !important; }
 
 /* ---------- Summary ---------- */
 
+/* The result column carries prose, so it stops at a readable width instead of
+   running the full remaining span of a wide viewport. */
+.results-col {
+  max-width: 860px;
+}
+
 .summary {
   padding: 4px 0 20px;
   border-bottom: 1px solid var(--rule);
@@ -959,18 +1040,21 @@ input[type=range] { accent-color: var(--accent) !important; }
 
 .summary-line {
   font-family: var(--font-doc);
-  font-size: 1.28rem;
-  line-height: 1.4;
+  font-size: 1.5rem;
+  line-height: 1.3;
   color: var(--ink);
-  margin: 0 0 6px;
+  margin: 0 0 8px;
   text-wrap: balance;
+  letter-spacing: -0.015em;
+  max-width: 34ch;
 }
 
 .summary-meta {
-  font-family: var(--font-data);
-  font-size: 0.74rem;
+  font-family: var(--font-ui);
+  font-size: 0.76rem;
   color: var(--ink-faint);
   margin: 0;
+  letter-spacing: 0.01em;
 }
 
 /* ---------- Findings ---------- */
@@ -987,63 +1071,88 @@ input[type=range] { accent-color: var(--accent) !important; }
   padding: 0;
   display: flex;
   flex-direction: column;
+  gap: 28px;
 }
 
+/* No accent rail. Severity is carried by the label text and the ink of the
+   clause itself; a coloured stripe here is decoration pretending to be
+   structure. */
 .finding {
-  padding: 18px 0 18px 18px;
-  border-left: 2px solid var(--ink);
+  padding: 0;
   border-bottom: 1px solid var(--rule);
+  padding-bottom: 26px;
 }
 
-.finding:last-child { border-bottom: none; padding-bottom: 4px; }
+.finding:last-child { border-bottom: none; padding-bottom: 0; }
 
 .finding-head {
   display: flex;
-  gap: 12px;
+  gap: 10px;
   align-items: baseline;
-  margin-bottom: 10px;
+  margin-bottom: 14px;
 }
 
+/* The index is a quiet ordinal, not a badge competing with the clause. */
 .finding-num {
   font-family: var(--font-data);
-  font-size: 0.74rem;
-  color: var(--ink);
-  border-bottom: 1.5px solid var(--ink);
-  padding-bottom: 1px;
+  font-size: 0.7rem;
+  color: var(--ink-faint);
   flex-shrink: 0;
+  padding-top: 2px;
+}
+
+.finding-titles {
+  min-width: 0;
 }
 
 .finding-title {
   font-family: var(--font-ui);
-  font-size: 0.92rem;
+  font-size: 1rem;
   font-weight: 600;
   color: var(--ink);
-  line-height: 1.35;
+  line-height: 1.3;
+  letter-spacing: -0.005em;
 }
 
 .finding-family {
-  font-size: 0.76rem;
+  font-size: 0.78rem;
   color: var(--ink-faint);
-  margin-top: 1px;
+  margin-top: 3px;
 }
 
+/* Severity is a word, not a colour wash, so it survives greyscale and
+   colour blindness. Colour is additive reinforcement only. */
+.sev {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+}
+
+.sev-high { color: #a4262c; }
+.sev-medium { color: #8a5a00; }
+.sev-low { color: #5b6b7f; }
+
+/* No opening-quote glyph: Newsreader draws " as a 9px hairline at display
+   size, which reads as a stray vertical bar rather than a quotation mark.
+   The serif at reading size already marks this as lifted contract text. */
 .finding-quote {
-  margin: 0 0 10px;
-  padding: 10px 14px;
-  background: var(--paper-sunk);
-  border-radius: 3px;
+  margin: 0 0 14px;
+  padding: 0;
+  background: none;
   font-family: var(--font-doc);
-  font-size: 0.98rem;
-  line-height: 1.62;
-  color: var(--ink-soft);
+  font-size: 1.12rem;
+  line-height: 1.55;
+  color: var(--ink);
+  max-width: 60ch;
 }
 
 .finding-detail {
   margin: 0;
-  font-size: 0.85rem;
-  line-height: 1.6;
+  font-size: 0.88rem;
+  line-height: 1.62;
   color: var(--ink-soft);
-  max-width: 62ch;
+  max-width: 66ch;
 }
 
 /* ---------- Empty / notice ---------- */
@@ -1426,9 +1535,20 @@ with gr.Blocks(**blocks_kwargs) as demo:
                     analyze_btn = gr.Button("Review contract", variant="primary", elem_classes=["btn-primary"])
 
                 # Output column
-                with gr.Column(scale=7):
+                with gr.Column(scale=7, elem_classes=["results-col"]):
                     summary_output = gr.HTML(empty_state(False))
-                    findings_output = gr.HTML("")
+                    # The marked-up text is the proof the classifier worked, so
+                    # it leads the results. The findings below explain it.
+                    annotated_label = gr.HTML(f"""
+                    <div class="doc-head">
+                      <p class="doc-label">The contract, marked</p>
+                      <div class="legend">
+                        <div class="legend-item"><span class="legend-swatch" style="background:{RISK_INK['HIGH RISK']}"></span>High</div>
+                        <div class="legend-item"><span class="legend-swatch" style="background:{RISK_INK['MEDIUM RISK']}"></span>Medium</div>
+                        <div class="legend-item"><span class="legend-swatch" style="background:{RISK_INK['LOW RISK']}"></span>Low</div>
+                      </div>
+                    </div>
+                    """, visible=False)
                     annotated = gr.HighlightedText(
                         interactive=False,
                         combine_adjacent=False,
@@ -1439,15 +1559,7 @@ with gr.Blocks(**blocks_kwargs) as demo:
                         color_map=COLOR_MAP,
                         elem_classes=["highlighted-text"]
                     )
-                    # The key uses the same severity ink as the finding rails, so
-                    # the legend and the marks it explains cannot drift apart.
-                    annotated_label = gr.HTML(f"""
-                    <div class="legend legend-key">
-                      <div class="legend-item"><span class="legend-swatch" style="background:{RISK_INK['HIGH RISK']}"></span>High</div>
-                      <div class="legend-item"><span class="legend-swatch" style="background:{RISK_INK['MEDIUM RISK']}"></span>Medium</div>
-                      <div class="legend-item"><span class="legend-swatch" style="background:{RISK_INK['LOW RISK']}"></span>Low</div>
-                    </div>
-                    """, visible=False)
+                    findings_output = gr.HTML("")
 
             btn_arb.click(lambda: PRESET_CASES["arbitration"], outputs=text_input)
             btn_surv.click(lambda: PRESET_CASES["surveillance"], outputs=text_input)
