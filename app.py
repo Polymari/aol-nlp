@@ -227,7 +227,7 @@ SEVERITY_ORDER = {"HIGH RISK": 0, "MEDIUM RISK": 1, "LOW RISK": 2}
 
 
 def render_findings(results):
-    """Render flagged clauses as an ordered findings list."""
+    """Render flagged clauses as modern, structured legal risk cards."""
     flagged = [(seg.strip(), label) for seg, label in results if label and seg.strip()]
     if not flagged:
         return ""
@@ -236,52 +236,80 @@ def render_findings(results):
     items = []
     for i, (segment, label) in enumerate(flagged, 1):
         info = categorize_gotcha(segment)
+        sev_slug = label.split()[0].lower()  # "high", "medium", "low"
         items.append(f"""
-        <li class="finding">
-          <div class="finding-head">
-            <span class="finding-num">{i:02d}</span>
-            <div class="finding-titles">
-              <div class="finding-title">{info['title']}</div>
-              <div class="finding-family">{info['family']} &middot; <span class="sev sev-{label.split()[0].lower()}">{label}</span></div>
+        <div class="finding-card finding-{sev_slug}">
+          <div class="finding-card-top">
+            <div class="finding-badge-row">
+              <span class="sev-pill sev-pill-{sev_slug}">{label}</span>
+              <span class="family-tag">{info['family']}</span>
             </div>
+            <span class="finding-num-tag">Issue #{i:02d}</span>
           </div>
-          <blockquote class="finding-quote">{segment}</blockquote>
-          <p class="finding-detail">{info['detail']}</p>
-        </li>
+          <h4 class="finding-title">{info['title']}</h4>
+          <div class="finding-quote-box">
+            <blockquote class="finding-quote">"{segment}"</blockquote>
+          </div>
+          <div class="finding-impact-box">
+            <span class="impact-lead">Rights & Liability Impact:</span> {info['detail']}
+          </div>
+        </div>
         """)
-    return f'<ol class="findings">{"".join(items)}</ol>'
+    return "".join(items)
 
 
-FINDINGS_HEAD = """
-<div class="doc-head findings-head">
-  <p class="doc-label">What each clause costs you</p>
+FINDINGS_HEAD_TEMPLATE = """
+<div class="findings-header">
+  <div class="findings-title-group">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+    <span class="findings-heading">Legal Risk Breakdown & Rights Impact</span>
+  </div>
+  <span class="findings-count-pill">{count} Clause{'' if count == 1 else 's'} Analyzed</span>
 </div>
 """
 
 
 def render_findings_block(results):
-    """Findings list with its own section heading."""
+    """Findings section with structured legal risk cards."""
+    flagged = [(seg.strip(), label) for seg, label in results if label and seg.strip()]
+    if not flagged:
+        return ""
+    head = FINDINGS_HEAD_TEMPLATE.format(count=len(flagged))
     body = render_findings(results)
-    return f"{FINDINGS_HEAD}{body}" if body else ""
+    return f'<div class="findings-section">{head}<div class="findings-list">{body}</div></div>'
 
 
 def render_summary(counts, elapsed_ms):
-    """A single honest sentence about what was found, plus secondary metadata."""
+    """Executive Audit summary bar with severity badges and live telemetry."""
     total = counts["high"] + counts["medium"] + counts["low"]
     if total == 0:
         return ""
-    # Only name the bands that actually fired; a "1 high risk, 0 medium, 0 low"
-    # line reads like a broken report.
-    parts = [
-        f"{counts[b]} {word}"
-        for b, word in (("high", "high risk"), ("medium", "medium"), ("low", "low"))
-        if counts[b]
-    ]
+
+    chips = []
+    if counts["high"]:
+        chips.append(f'<span class="sev-chip sev-chip-high"><span class="chip-dot">●</span> {counts["high"]} High Risk</span>')
+    if counts["medium"]:
+        chips.append(f'<span class="sev-chip sev-chip-med"><span class="chip-dot">●</span> {counts["medium"]} Medium</span>')
+    if counts["low"]:
+        chips.append(f'<span class="sev-chip sev-chip-low"><span class="chip-dot">●</span> {counts["low"]} Low</span>')
+
+    chips_html = "".join(chips)
     device = get_inference_device().type.upper()
+
     return f"""
-    <div class="summary">
-      <p class="summary-line">{total} flagged clause{'' if total == 1 else 's'}.</p>
-      <p class="summary-meta">{" · ".join(parts)} &middot; {elapsed_ms:.0f} ms on {device}</p>
+    <div class="audit-summary-bar">
+      <div class="summary-left">
+        <div class="summary-status-badge status-alert">
+          <svg class="summary-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+          <span>{total} Flagged Clause{'' if total == 1 else 's'}</span>
+        </div>
+        <div class="sev-chip-group">
+          {chips_html}
+        </div>
+      </div>
+      <div class="summary-right">
+        <span class="telemetry-pill">⚡ {elapsed_ms:.0f} ms · {device}</span>
+      </div>
     </div>
     """
 
@@ -289,17 +317,35 @@ def render_summary(counts, elapsed_ms):
 def empty_state(has_text):
     if not has_text:
         return """
-        <div class="empty">
-          <p class="empty-title">Paste a contract to begin</p>
-          <p class="empty-body">Terms of service, a privacy policy, or an EULA. Every sentence is
-          classified for risky clauses and the flagged text is marked in place.</p>
+        <div class="empty-state-card">
+          <div class="empty-icon-wrap">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+              <line x1="16" y1="13" x2="8" y2="13"></line>
+              <line x1="16" y1="17" x2="8" y2="17"></line>
+              <polyline points="10 9 9 9 8 9"></polyline>
+            </svg>
+          </div>
+          <h3 class="empty-title">Ready for Contract Audit</h3>
+          <p class="empty-body">Paste any Terms of Service, Privacy Policy, or EULA on the left, or select a sample agreement above. Neural token classifiers will audit every clause and highlight predatory stipulations.</p>
+          <div class="empty-tips">
+            <span class="tip-item"><span class="tip-dot">●</span> 4 Fine-Tuned Models</span>
+            <span class="tip-item"><span class="tip-dot">●</span> BIO Token Span Tagging</span>
+            <span class="tip-item"><span class="tip-dot">●</span> Hardware Telemetry</span>
+          </div>
         </div>
         """
     return """
-    <div class="empty">
-      <p class="empty-title">No risky clauses flagged</p>
-      <p class="empty-body">Nothing in this text crossed the sensitivity threshold. Try lowering the
-      threshold to one if you want a more sensitive pass.</p>
+    <div class="clean-state-card">
+      <div class="clean-icon-wrap">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+          <polyline points="22 4 12 14.01 9 11.01"></polyline>
+        </svg>
+      </div>
+      <h3 class="clean-title">No High-Risk Clauses Detected</h3>
+      <p class="clean-body">All evaluated clauses fell within standard consumer agreement parameters at the current sensitivity threshold. Try lowering the sensitivity threshold to 1 or 2 if you want a more cautious sweep.</p>
     </div>
     """
 
@@ -425,158 +471,136 @@ PRESET_CASES = {
 # ---------------------------------------------------------------------------
 
 CUSTOM_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Inter:wght@400;450;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
-  --paper:        #fbfaf8;
-  --paper-sunk:   #f4f2ee;
+  --paper:        #f8fafc;
   --surface:      #ffffff;
-  --rule:         #e5e1da;
-  --rule-strong:  #d3cec4;
+  --paper-sunk:   #f1f5f9;
+  --rule:         #e2e8f0;
+  --rule-strong:  #cbd5e1;
 
-  --ink:          #1c1a17;
-  --ink-soft:     #56514a;
-  /* 5.15:1 on paper, 4.81:1 on the sunken quote surface. The lighter
-     #6f6a60 failed AA at 3.56:1. */
-  --ink-faint:    #6f6a60;
+  --ink:          #0f172a;
+  --ink-soft:     #334155;
+  --ink-faint:    #64748b;
 
-  --accent:       #a4262c;
-  --accent-wash:  #fdf3f3;
-  --focus:        #1c1a17;
+  --brand-navy:   #0f172a;
+  --brand-blue:   #2563eb;
+  --accent:       #0f172a;
+  --focus:        #2563eb;
 
-  --radius:       6px;
-  --gap-sm:       8px;
-  --gap:          16px;
-  --gap-lg:       36px;
+  --sev-high-bg:  #fef2f2;
+  --sev-high-ink: #991b1b;
+  --sev-high-bdr: #fecaca;
+  --sev-high-bar: #ef4444;
 
+  --sev-med-bg:   #fffbeb;
+  --sev-med-ink:  #92400e;
+  --sev-med-bdr:  #fde68a;
+  --sev-med-bar:  #f59e0b;
+
+  --sev-low-bg:   #f0fdf4;
+  --sev-low-ink:  #166534;
+  --sev-low-bdr:  #bbf7d0;
+  --sev-low-bar:  #22c55e;
+
+  --radius-lg:    12px;
+  --radius-md:    8px;
+  --radius-sm:    6px;
+
+  --shadow-card:  0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.03);
+  --shadow-hover: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -2px rgba(0, 0, 0, 0.04);
+
+  --font-ui:   'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-doc:  'Newsreader', Georgia, serif;
-  --font-ui:   'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-data: 'JetBrains Mono', ui-monospace, monospace;
 
-  /* ---- Gradio 6 theme variables ----
-     Gradio 6 scopes its theme to :root.dark and to an injected body rule that
-     outranks a plain .gradio-container selector. Overriding these at equal or
-     higher specificity is what actually forces the light surface. */
-  --bg:                    #fbfaf8;
-  --col:                   #1c1a17;
-  --background-fill-primary:   #fbfaf8;
-  --body-background-fill:      #fbfaf8;
-  --body-text-color:           #1c1a17;
-  --body-text-color-subdued:   #56514a;
-  --body-text-color-muted:     #6f6a60;
-  --neutral-1:                #1c1a17;
-  --neutral-100:              #f4f2ee;
-  --neutral-200:              #e5e1da;
-  --neutral-300:              #d3cec4;
-  --neutral-500:              #6f6a60;
-  --neutral-700:              #56514a;
+  /* Gradio 6 theme variable overrides */
+  --bg:                    #f8fafc;
+  --col:                   #0f172a;
+  --background-fill-primary:   #f8fafc;
+  --body-background-fill:      #f8fafc;
+  --body-text-color:           #0f172a;
+  --body-text-color-subdued:   #334155;
+  --body-text-color-muted:     #64748b;
+  --neutral-50:               #ffffff;
+  --neutral-100:              #f1f5f9;
+  --neutral-200:              #e2e8f0;
+  --neutral-300:              #cbd5e1;
+  --neutral-500:              #64748b;
+  --neutral-700:              #334155;
+  --neutral-900:              #0f172a;
   --input-background-fill:    #ffffff;
   --input-background-fill-hover: #ffffff;
-  --input-border-color:       #d3cec4;
-  --input-border-color-hover: #6f6a60;
+  --input-border-color:       #cbd5e1;
+  --input-border-color-hover: #94a3b8;
   --block-background-fill:    #ffffff;
-  --block-background-fill-soft: #f4f2ee;
-  --block-border-color:       #e5e1da;
-  --block-border-color-soft:  #e5e1da;
-  --border-primary:           #e5e1da;
-  --border-primary-accent:    #d3cec4;
-  --color-accent:             #a4262c;
-  --color-accent-soft:        #fdf3f3;
-  --color-accent-crisp:       #a4262c;
-  --button-primary-background-fill: #a4262c;
-  --button-primary-background-fill-hover: #8f1f24;
+  --block-background-fill-soft: #f8fafc;
+  --block-border-color:       #e2e8f0;
+  --border-primary:           #e2e8f0;
+  --color-accent:             #2563eb;
+  --button-primary-background-fill: #0f172a;
+  --button-primary-background-fill-hover: #1e293b;
   --button-primary-text-color: #ffffff;
   --button-secondary-background-fill: #ffffff;
-  --button-secondary-background-fill-hover: #f4f2ee;
-  --button-secondary-text-color: #1c1a17;
-  --button-secondary-border-color: #d3cec4;
-  --checkbox-background-fill: #ffffff;
-  --slider-color: #a4262c;
+  --button-secondary-background-fill-hover: #f1f5f9;
+  --button-secondary-text-color: #0f172a;
+  --button-secondary-border-color: #cbd5e1;
   --table-background-fill: #ffffff;
-  --table-even-background-fill: #fbfaf8;
+  --table-even-background-fill: #f8fafc;
   --table-odd-background-fill: #ffffff;
-  --dataframe-selected-background-fill: #fdf3f3;
+  --dataframe-selected-background-fill: #eff6ff;
 }
 
 html, body {
   background: var(--paper) !important;
   color: var(--ink) !important;
+  font-family: var(--font-ui) !important;
 }
 
 body.dark, :root.dark, .dark {
   color-scheme: light;
 }
 
-/* Gradio 6 keeps the page in a `.dark` scope whose `:root.dark` rule outranks a
-   plain `:root`, so the neutral ramp has to be restated on that selector too
-   or inputs keep resolving to their hardcoded dark fills. */
 :root.dark, .dark {
-  --bg:                    #fbfaf8;
-  --col:                   #1c1a17;
-  --background-fill-primary:   #fbfaf8;
-  --body-background-fill:      #fbfaf8;
-  --body-text-color:           #1c1a17;
-  --body-text-color-subdued:   #56514a;
-  --body-text-color-muted:     #6f6a60;
-  --neutral-1:                #1c1a17;
-  --neutral-100:              #f4f2ee;
-  --neutral-200:              #e5e1da;
-  --neutral-300:              #d3cec4;
-  --neutral-500:              #6f6a60;
-  --neutral-600:              #6f6a60;
-  --neutral-700:              #56514a;
-  --neutral-800:              #3a3630;
-  --neutral-900:              #2a2724;
-  --neutral-950:              #1c1a17;
+  --bg:                    #f8fafc;
+  --col:                   #0f172a;
+  --background-fill-primary:   #f8fafc;
+  --body-background-fill:      #f8fafc;
+  --body-text-color:           #0f172a;
+  --body-text-color-subdued:   #334155;
+  --body-text-color-muted:     #64748b;
+  --neutral-1:                #0f172a;
+  --neutral-100:              #f1f5f9;
+  --neutral-200:              #e2e8f0;
+  --neutral-300:              #cbd5e1;
+  --neutral-500:              #64748b;
+  --neutral-700:              #334155;
   --input-background-fill:    #ffffff;
   --input-background-fill-hover: #ffffff;
-  --input-border-color:       #d3cec4;
-  --input-border-color-hover: #6f6a60;
+  --input-border-color:       #cbd5e1;
   --block-background-fill:    #ffffff;
-  --block-background-fill-soft: #f4f2ee;
-  --block-border-color:       #e5e1da;
-  --block-border-color-soft:  #e5e1da;
-  --border-primary:           #e5e1da;
-  --color-accent:             #a4262c;
-  --color-accent-soft:        #fdf3f3;
-  --color-accent-crisp:       #a4262c;
-  --button-primary-background-fill: #a4262c;
-  --button-primary-background-fill-hover: #8f1f24;
+  --block-border-color:       #e2e8f0;
+  --border-primary:           #e2e8f0;
+  --color-accent:             #2563eb;
+  --button-primary-background-fill: #0f172a;
+  --button-primary-background-fill-hover: #1e293b;
   --button-primary-text-color: #ffffff;
-  --button-secondary-background-fill: #ffffff;
-  --button-secondary-background-fill-hover: #f4f2ee;
-  --button-secondary-text-color: #1c1a17;
-  --button-secondary-border-color: #d3cec4;
-  --slider-color: #a4262c;
   --table-background-fill: #ffffff;
-  --table-even-background-fill: #fbfaf8;
+  --table-even-background-fill: #f8fafc;
   --table-odd-background-fill: #ffffff;
   --color-scheme: light;
 }
 
-/* Gradio 6's dark scope paints .block, .form and .column with hardcoded dark
-   fills that sit behind the input and swallow it. Force the page's own
-   surfaces, then re-establish the textbox as the one white control. */
+/* Base resets & clear container */
 .main, .column, .row, .form, .panel, .block,
 .form > *, .block > *, .column > *, .row > * {
   background-color: transparent !important;
   border-color: transparent !important;
 }
 
-.textbox, .textbox > *, .textbox textarea {
-  background-color: var(--surface) !important;
-  color: var(--ink) !important;
-}
+/* ---------- Shell & Layout ---------- */
 
-.textbox {
-  border-color: var(--rule-strong) !important;
-}
-
-/* ---------- Shell ---------- */
-
-/* gradio-app is the flex parent, so the container itself must fill it and
-   the width cap belongs on an inner wrapper. Capping the container directly
-   makes it a shrink-to-fit flex item and it collapses to content width. */
 .gradio-container {
   background: var(--paper) !important;
   color: var(--ink) !important;
@@ -588,60 +612,114 @@ body.dark, :root.dark, .dark {
 }
 
 .gradio-container > .main {
-  max-width: 1480px;
+  max-width: 1440px;
   margin-inline: auto;
   width: 100%;
 }
 
+/* ---------- Masthead Navigation ---------- */
+
 .masthead {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: var(--gap);
-  padding: 40px 0 20px;
+  gap: 16px;
+  padding: 24px 0 20px;
   border-bottom: 1px solid var(--rule);
-  margin-bottom: 32px;
+  margin-bottom: 24px;
 }
 
-.masthead-brand {
+.masthead-left {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: center;
+  gap: 14px;
 }
 
-.wordmark {
-  font-family: var(--font-doc);
-  font-size: 1.5rem;
-  font-weight: 600;
-  letter-spacing: -0.015em;
+.masthead-logo-shield {
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 4px rgba(15, 23, 42, 0.15);
+}
+
+.masthead-title-wrap {
+  display: flex;
+  flex-direction: column;
+}
+
+.masthead-brand-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brand-title {
+  font-family: var(--font-ui);
+  font-size: 1.3rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
   color: var(--ink);
 }
 
-.wordmark-sub {
-  font-size: 0.82rem;
-  color: var(--ink-faint);
-  letter-spacing: 0.01em;
+.brand-tag {
+  font-family: var(--font-ui);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+  padding: 2px 7px;
+  border-radius: 4px;
+  text-transform: uppercase;
 }
 
-.masthead-note {
+.brand-subtitle {
   font-size: 0.82rem;
   color: var(--ink-faint);
-  margin: 0;
-  max-width: 34ch;
-  text-align: right;
-  line-height: 1.5;
+  margin: 2px 0 0;
+}
+
+.masthead-right {
+  display: flex;
+  align-items: center;
+}
+
+.status-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #ffffff;
+  border: 1px solid var(--rule);
+  border-radius: 20px;
+  padding: 6px 14px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--ink-soft);
+  box-shadow: var(--shadow-card);
+}
+
+.status-pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
 }
 
 /* ---------- Tabs ---------- */
 
-/* Gradio 6 renders tabs as .tabs > .tab-wrapper > .tab-container. The old
-   .gr-tabs / .tab-nav names belong to Gradio 4 and match nothing here. */
 .tabs > .tab-wrapper > .tab-container {
   display: flex !important;
-  gap: 26px !important;
+  gap: 28px !important;
   border-bottom: 1px solid var(--rule) !important;
-  margin-bottom: 32px !important;
+  margin-bottom: 24px !important;
   background: transparent !important;
   flex-wrap: wrap;
 }
@@ -650,171 +728,140 @@ body.dark, :root.dark, .dark {
   background: none !important;
   border: none !important;
   box-shadow: none !important;
-  padding: 8px 0 12px !important;
+  padding: 10px 2px 14px !important;
   border-bottom: 2px solid transparent !important;
   margin-bottom: -1px !important;
   font-family: var(--font-ui) !important;
-  font-size: 0.9rem !important;
-  font-weight: 450 !important;
+  font-size: 0.92rem !important;
+  font-weight: 500 !important;
   color: var(--ink-faint) !important;
-  transition: color 120ms ease, border-color 120ms ease;
+  transition: all 120ms ease;
 }
 
 .tabs > .tab-wrapper > .tab-container > button:hover {
-  color: var(--ink-soft) !important;
-}
-
-.tabs > .tab-wrapper > .tab-container > button:focus-visible {
-  outline: 2px solid var(--focus) !important;
-  outline-offset: 3px !important;
-  border-radius: 2px;
+  color: var(--ink) !important;
 }
 
 .tabs > .tab-wrapper > .tab-container > button.selected {
   color: var(--ink) !important;
   font-weight: 600 !important;
-  border-bottom-color: var(--accent) !important;
+  border-bottom-color: var(--ink) !important;
 }
 
-/* ---------- Field labels ---------- */
-/* Gradio paints label + hint text from block_info_text_color, which reads
-   near-white on this light surface unless it is restated. */
-label, label > span,
-.block > label, .block > label > span,
-.block_label, .block_info, .block_info > span,
-span.block_label, span.block_info,
-span.has-info {
-  color: var(--ink-soft) !important;
-  font-weight: 500 !important;
-  letter-spacing: 0 !important;
-  text-transform: none !important;
-  opacity: 1 !important;
+/* ---------- Preset Bar ---------- */
+
+.preset-bar {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  flex-wrap: wrap !important;
+  padding: 12px 18px !important;
+  background: #ffffff !important;
+  border: 1px solid var(--rule) !important;
+  border-radius: var(--radius-md) !important;
+  margin-bottom: 20px !important;
+  box-shadow: var(--shadow-card) !important;
 }
 
-/* The hint under a field label is secondary, not primary. */
-span.has-info + span,
-.block .has-info:not(:only-child) {
-  color: var(--ink-faint) !important;
-  font-weight: 400 !important;
-}
-
-.block > label, .block > label > span, .block_label {
-  color: var(--ink) !important;
-}
-
-.block_info, .block_info > span, .block_info_text {
-  color: var(--ink-faint) !important;
-  font-weight: 400 !important;
-  font-size: 0.74rem !important;
-}
-
-/* ---------- Inputs ---------- */
-
-.gr-textbox textarea, .gr-textbox input {
-  background: var(--surface) !important;
-  color: var(--ink) !important;
-  border: 1px solid var(--rule-strong) !important;
-  border-radius: var(--radius) !important;
-  font-family: var(--font-doc) !important;
-  font-size: 1.02rem !important;
-  line-height: 1.65 !important;
-  padding: 14px 16px !important;
-  transition: border-color 120ms ease, box-shadow 120ms ease;
-}
-
-.gr-textbox textarea:focus, .gr-textbox input:focus {
-  border-color: var(--focus) !important;
-  box-shadow: 0 0 0 3px rgba(28, 26, 23, 0.08) !important;
-  outline: none !important;
-}
-
-.gr-textbox label, .gr-dropdown label, .gr-slider label, .gr-checkbox label {
-  font-family: var(--font-ui) !important;
-  font-size: 0.78rem !important;
-  font-weight: 500 !important;
-  color: var(--ink-soft) !important;
-  margin-bottom: 6px !important;
-}
-
-.gr-textbox .info, .gr-slider .info, .gr-dropdown .info {
-  font-size: 0.74rem !important;
-  color: var(--ink-faint) !important;
-}
-
-.gr-dropdown > div, .gr-dropdown .wrap {
-  background: var(--surface) !important;
-  border: 1px solid var(--rule-strong) !important;
-  border-radius: var(--radius) !important;
-}
-
-input[type=range] { accent-color: var(--accent) !important; }
-
-/* ---------- Buttons ---------- */
-
-.gr-button {
-  font-family: var(--font-ui) !important;
-  font-weight: 500 !important;
-  font-size: 0.88rem !important;
-  border-radius: var(--radius) !important;
-  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
-}
-
-/* The primary action is an inked button, not a slab of saturated colour.
-   A full-width crimson block out-shouts the document it is meant to serve;
-   dark ink at the same weight reads as decisive and lets red stay reserved
-   for risk. It also stops stretching the full column width. */
-.btn-primary {
-  background: var(--ink) !important;
-  border: 1px solid var(--ink) !important;
-  color: var(--paper) !important;
-  font-weight: 500 !important;
-  width: auto !important;
-  align-self: flex-start !important;
-  padding: 0.6rem 1.5rem !important;
-}
-
-.btn-primary:hover {
-  background: #322d27 !important;
-  border-color: #322d27 !important;
-}
-
-.btn-secondary {
-  background: var(--surface) !important;
-  border: 1px solid var(--rule-strong) !important;
-  color: var(--ink-soft) !important;
-}
-.btn-secondary:hover { border-color: var(--ink-faint) !important; color: var(--ink) !important; }
-
-.gr-button:focus-visible, button:focus-visible, textarea:focus-visible, select:focus-visible {
-  outline: 2px solid var(--focus) !important;
-  outline-offset: 2px !important;
-}
-
-/* The contract textarea is the tallest thing in the input column, so it
-   grows to fill the column instead of leaving dead space beneath it.
-   Gradio's column is a plain flex item, so the stretch has to be enabled
-   on it explicitly before the child can grow into it. */
-.row:not(.preset-bar) > .column:has(.contract-input) {
+.preset-label-wrap {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-faint);
+  margin-right: 6px;
 }
 
-/* The primary action sits at the foot of the input column, so the field above
-   it absorbs the slack rather than leaving a void under the button. */
-.row:not(.preset-bar) > .column:has(.contract-input) > .block:has(.btn-primary) {
-  margin-top: auto;
-  padding-top: 20px;
+.preset-label {
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  white-space: nowrap;
 }
 
+.preset-btn {
+  background: #f8fafc !important;
+  border: 1px solid var(--rule) !important;
+  color: var(--ink-soft) !important;
+  font-size: 0.8rem !important;
+  font-weight: 500 !important;
+  padding: 5px 12px !important;
+  min-height: 0 !important;
+  width: auto !important;
+  flex: 0 0 auto !important;
+  border-radius: 20px !important;
+  box-shadow: none !important;
+  transition: all 120ms ease !important;
+}
+
+.preset-btn:hover {
+  background: #ffffff !important;
+  border-color: var(--rule-strong) !important;
+  color: var(--ink) !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06) !important;
+  transform: translateY(-1px) !important;
+}
+
+/* ---------- Workspace Dual Cards ---------- */
+
+.workspace-row {
+  gap: 24px !important;
+  align-items: stretch !important;
+}
+
+.workspace-card {
+  background: var(--surface) !important;
+  border: 1px solid var(--rule) !important;
+  border-radius: var(--radius-lg) !important;
+  padding: 24px !important;
+  box-shadow: var(--shadow-card) !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 12px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.card-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+}
+
+.card-heading {
+  font-family: var(--font-ui);
+  font-size: 0.96rem;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0;
+}
+
+.card-tag {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  background: var(--paper-sunk);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+/* Textarea input */
 .contract-input {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
 }
 
-/* Gradio inserts .input-container between the block and the textarea, and it
-   defaults to flex: 0 1 auto, which stops the textarea from growing into the
-   column. It has to grow too for the stretch to reach the field. */
 .contract-input .input-container {
   flex: 1 1 auto;
   display: flex;
@@ -824,126 +871,297 @@ input[type=range] { accent-color: var(--accent) !important; }
 
 .contract-input textarea {
   flex: 1 1 auto;
-  min-height: 340px;
+  min-height: 320px;
+  background: #ffffff !important;
+  border: 1px solid var(--rule-strong) !important;
+  border-radius: var(--radius-md) !important;
+  font-family: var(--font-doc) !important;
+  font-size: 0.98rem !important;
+  line-height: 1.65 !important;
+  color: var(--ink) !important;
+  padding: 14px 16px !important;
+  transition: border-color 140ms ease, box-shadow 140ms ease !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.02) !important;
 }
 
-/* ---------- Control row ---------- */
-/* Model and sensitivity sit in one column so each keeps a single-line
-   label; stacking them also stops them reading as competing peers. */
-.control-row {
-  gap: 20px !important;
-  align-items: start !important;
+.contract-input textarea:focus {
+  border-color: #3b82f6 !important;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15) !important;
+  outline: none !important;
 }
 
-.control-row > * {
-  min-width: 0 !important;
+/* Controls box inside input card */
+.control-box {
+  background: var(--paper-sunk) !important;
+  border: 1px solid var(--rule) !important;
+  border-radius: var(--radius-md) !important;
+  padding: 14px 16px !important;
+  margin-top: 16px !important;
+  margin-bottom: 16px !important;
+  gap: 16px !important;
 }
 
-/* Gradio's slider header collapses to a narrow column, which wrapped the
-   "Sensitivity" label and its hint onto three lines each. Give the header
-   the full track width. The hint is allowed to wrap rather than clip. */
-.control-row .wrap,
-.control-row .head {
+.control-box .wrap, .control-box .head {
   width: 100% !important;
 }
 
-.control-row label,
-.control-row .head > label {
-  white-space: nowrap !important;
-}
-
-.control-row .info-text,
-.control-row .block_info {
-  max-width: none !important;
-}
-
-/* ---------- Presets ----------
-   These are a convenience, not the main event. They render as small text
-   buttons on a hairline row so the review button keeps the accent. */
-.preset-bar {
-  display: flex !important;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 4px;
-  flex-wrap: wrap;
-  padding-bottom: 18px;
-  margin-bottom: 4px;
-  border-bottom: 1px solid var(--rule);
-  max-width: 980px;
-}
-
-.preset-label {
-  font-size: 0.78rem;
-  color: var(--ink-faint);
-  white-space: nowrap;
-  margin-inline-end: 10px;
-}
-
-.preset-btn {
-  background: none !important;
-  border: 1px solid transparent !important;
+.control-box label {
+  font-family: var(--font-ui) !important;
+  font-size: 0.78rem !important;
+  font-weight: 600 !important;
   color: var(--ink-soft) !important;
-  font-size: 0.8rem !important;
-  font-weight: 450 !important;
-  padding: 5px 10px !important;
-  min-height: 0 !important;
-  width: auto !important;
-  flex: 0 0 auto !important;
-  border-radius: 4px !important;
-  box-shadow: none !important;
-  text-decoration: underline;
-  text-decoration-color: var(--rule-strong);
-  text-underline-offset: 3px;
+  margin-bottom: 4px !important;
 }
 
-.preset-btn:hover {
-  background: var(--paper-sunk) !important;
-  border-color: var(--rule-strong) !important;
-  color: var(--ink) !important;
-  text-decoration-color: transparent;
+.control-box .info {
+  font-size: 0.74rem !important;
+  color: var(--ink-faint) !important;
 }
 
-.preset-btn:focus-visible {
-  outline: 2px solid var(--focus) !important;
-  outline-offset: 2px !important;
+/* Primary CTA Button */
+.btn-primary {
+  background: #0f172a !important;
+  border: 1px solid #0f172a !important;
+  color: #ffffff !important;
+  font-family: var(--font-ui) !important;
+  font-size: 0.92rem !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.01em !important;
+  padding: 12px 24px !important;
+  border-radius: var(--radius-md) !important;
+  box-shadow: 0 2px 4px rgba(15, 23, 42, 0.12) !important;
+  cursor: pointer !important;
+  transition: all 140ms ease !important;
+  width: 100% !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
 }
 
-/* ---------- Document ---------- */
+.btn-primary:hover {
+  background: #1e293b !important;
+  border-color: #1e293b !important;
+  transform: translateY(-1px) !important;
+  box-shadow: 0 4px 8px rgba(15, 23, 42, 0.18) !important;
+}
 
-.doc-pane {
-  background: var(--surface);
+.btn-primary:active {
+  transform: translateY(0) !important;
+}
+
+/* ---------- Results Panel & Document Viewer ---------- */
+
+.audit-summary-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  background: #ffffff;
   border: 1px solid var(--rule);
-  border-radius: var(--radius);
-  padding: 24px 26px;
-  min-height: 320px;
+  border-radius: var(--radius-md);
+  padding: 12px 18px;
+  margin-bottom: 18px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
 }
 
+.summary-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.summary-status-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.summary-icon {
+  color: #dc2626;
+}
+
+.sev-chip-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.sev-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 20px;
+}
+
+.sev-chip-high {
+  background: var(--sev-high-bg);
+  color: var(--sev-high-ink);
+  border: 1px solid var(--sev-high-bdr);
+}
+
+.sev-chip-med {
+  background: var(--sev-med-bg);
+  color: var(--sev-med-ink);
+  border: 1px solid var(--sev-med-bdr);
+}
+
+.sev-chip-low {
+  background: var(--sev-low-bg);
+  color: var(--sev-low-ink);
+  border: 1px solid var(--sev-low-bdr);
+}
+
+.chip-dot {
+  font-size: 0.65rem;
+}
+
+.summary-right {
+  display: flex;
+  align-items: center;
+}
+
+.telemetry-pill {
+  font-family: var(--font-data);
+  font-size: 0.76rem;
+  color: var(--ink-faint);
+  background: var(--paper-sunk);
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--rule);
+}
+
+/* Document Header & Legend */
+.doc-viewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-bottom: 10px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.doc-viewer-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.76rem;
+  font-weight: 500;
+  color: var(--ink-soft);
+}
+
+.legend-indicator {
+  width: 14px;
+  height: 4px;
+  border-radius: 2px;
+}
+
+.legend-high .legend-indicator { background: var(--sev-high-bar); }
+.legend-med .legend-indicator  { background: var(--sev-med-bar); }
+.legend-low .legend-indicator  { background: var(--sev-low-bar); }
+
+/* Document Reader Scroll Pane */
+.doc-reader-scroll {
+  max-height: 480px !important;
+  overflow-y: auto !important;
+  background: #ffffff !important;
+  border: 1px solid var(--rule) !important;
+  border-radius: var(--radius-md) !important;
+  padding: 20px 22px !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.02) !important;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 #f8fafc;
+}
+
+.doc-reader-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.doc-reader-scroll::-webkit-scrollbar-track {
+  background: #f8fafc;
+}
+
+.doc-reader-scroll::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+.doc-reader-scroll::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* HighlightedText Typography and Highlighting Stems */
 .highlighted-text {
+  font-family: var(--font-doc) !important;
+  font-size: 1.02rem !important;
+  line-height: 1.75 !important;
+  color: #1e293b !important;
   background: transparent !important;
   border: none !important;
   padding: 0 !important;
-  /* Gradio tags a scale-less component "auto-margin" and centres it, which
-     pushed the marked text ~105px right of the heading above it. */
-  margin-left: 0 !important;
-  margin-right: 0 !important;
-  font-family: var(--font-doc) !important;
-  font-size: 1.05rem !important;
-  line-height: 1.7 !important;
-  color: var(--ink-soft) !important;
-  /* Cap the measure. Without this the annotated prose runs to ~140
-     characters per line in a wide column, which is unreadable. */
-  max-width: 68ch !important;
 }
 
-/* Flagged spans carry a wash plus a red underline, so severity is legible
-   as a shape and not only as a pale tint. */
 .highlighted-text span[style*="background"] {
-  box-shadow: inset 0 -2px 0 rgba(164, 38, 44, 0.45);
-  padding: 2px 1px !important;
+  border-radius: 3px !important;
+  padding: 2px 4px !important;
+  margin: 0 1px !important;
+  font-weight: 500 !important;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
-/* Token spans are inline; let the browser wrap between them rather than
-   letting the component hyphenate words at its own boundaries. */
+/* High Risk Highlighter (Matches #fde8ea) */
+.highlighted-text span[style*="fde8ea"],
+.highlighted-text span[style*="253, 232, 234"] {
+  background-color: var(--sev-high-bg) !important;
+  color: var(--sev-high-ink) !important;
+  box-shadow: inset 0 -2px 0 var(--sev-high-bar) !important;
+}
+
+/* Medium Risk Highlighter (Matches #fdf0dd) */
+.highlighted-text span[style*="fdf0dd"],
+.highlighted-text span[style*="253, 240, 221"] {
+  background-color: var(--sev-med-bg) !important;
+  color: var(--sev-med-ink) !important;
+  box-shadow: inset 0 -2px 0 var(--sev-med-bar) !important;
+}
+
+/* Low Risk Highlighter (Matches #eef1f4) */
+.highlighted-text span[style*="eef1f4"],
+.highlighted-text span[style*="238, 241, 244"] {
+  background-color: var(--sev-low-bg) !important;
+  color: var(--sev-low-ink) !important;
+  box-shadow: inset 0 -2px 0 var(--sev-low-bar) !important;
+}
+
+/* Wrap tokens cleanly */
 .highlighted-text .token,
 .highlighted-text .token-container,
 .highlighted-text .text,
@@ -955,351 +1173,245 @@ input[type=range] { accent-color: var(--accent) !important; }
   overflow-wrap: break-word !important;
 }
 
-/* Gradio marks an HTML container "pending" once it has been toggled visible
-   and never clears the class, which pins it at opacity 0.2. The legend is
-   static content, so it is never actually pending. */
-.html-container.pending {
-  opacity: 1 !important;
-}
+/* ---------- Findings Section & Legal Risk Cards ---------- */
 
-/* Gradio stamps a "processing | Ns" line and an edit affordance on every
-   run. The summary already reports latency, and a read-only annotation view
-   has nothing to edit. These render in sibling blocks rather than inside
-   .highlighted-text, so they are matched on their own class names. */
-.progress-text,
-[class*="progress-text"] {
-  display: none !important;
-}
-
-.wrap.full.translucent {
-  display: none !important;
-}
-
-.highlighted-text span {
-  border-radius: 2px !important;
-  padding: 1px 2px !important;
-  color: var(--ink) !important;
-  box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
-}
-
-.doc-label {
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-  margin: 0 0 10px;
-}
-
-/* Legend rides on the same line as the heading it explains, so it reads as
-   a key to that panel rather than a floating strip of loose swatches. */
-.doc-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--gap);
-  flex-wrap: wrap;
-  padding-bottom: 10px;
-  margin-bottom: 14px;
-  border-bottom: 1px solid var(--rule);
-}
-
-/* The key reads as a caption under the annotated prose, not a floating
-   strip, so it keeps its own top margin rather than the panel divider. */
-.legend-key {
-  padding-top: 12px;
-  margin-top: 12px;
+.findings-section {
+  margin-top: 28px;
+  padding-top: 22px;
   border-top: 1px solid var(--rule);
 }
 
-/* Section heading that carries its own rule, used above the marked text and
-   above the findings. Both are labelled sections in the result column, not
-   loose caption text floating over body copy. */
-.doc-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--gap);
-  flex-wrap: wrap;
-  padding-bottom: 12px;
-  margin-bottom: 18px;
-  border-bottom: 1px solid var(--rule);
-}
-
-.doc-head .doc-label { margin: 0; }
-
-/* The findings are a second section in the same column, so they need their
-   own air and a rule to separate them from the marked text above. */
-.findings-head {
-  margin-top: 40px;
-  padding-top: 28px;
-  border-top: 1px solid var(--rule);
-}
-
-.legend {
-  display: flex;
-  gap: 18px;
-  flex-wrap: wrap;
-  padding-top: 16px;
-  margin-top: 18px;
-  border-top: 1px solid var(--rule);
-}
-
-.legend-item {
+.findings-header {
   display: flex;
   align-items: center;
-  gap: 7px;
-  font-size: 0.78rem;
-  font-weight: 500;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.findings-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--ink);
 }
 
-.legend-swatch {
-  width: 22px;
-  height: 3px;
-  border-radius: 2px;
-}
-
-/* ---------- Summary ---------- */
-
-/* The result column carries prose, so it stops at a readable width instead of
-   running the full remaining span of a wide viewport. */
-.results-col {
-  max-width: 860px;
-}
-
-.summary {
-  padding: 4px 0 20px;
-  border-bottom: 1px solid var(--rule);
-  margin-bottom: 20px;
-}
-
-.summary-line {
-  font-family: var(--font-doc);
-  font-size: 1.5rem;
-  line-height: 1.3;
-  color: var(--ink);
-  margin: 0 0 8px;
-  text-wrap: balance;
-  letter-spacing: -0.015em;
-  max-width: 34ch;
-}
-
-.summary-meta {
+.findings-heading {
   font-family: var(--font-ui);
-  font-size: 0.76rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.findings-count-pill {
+  font-size: 0.74rem;
+  font-weight: 600;
   color: var(--ink-faint);
-  margin: 0;
-  letter-spacing: 0.01em;
+  background: var(--paper-sunk);
+  padding: 3px 9px;
+  border-radius: 12px;
+  border: 1px solid var(--rule);
 }
 
-/* ---------- Findings ---------- */
-
-/* The findings are an <ol> only for semantics; the visible number lives in
-   .finding-num, so the native marker has to be suppressed explicitly. */
-.findings,
-.findings > li {
-  list-style: none !important;
-}
-
-.findings {
-  margin: 0;
-  padding: 0;
+.findings-list {
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 12px;
 }
 
-/* No accent rail. Severity is carried by the label text and the ink of the
-   clause itself; a coloured stripe here is decoration pretending to be
-   structure. */
-.finding {
-  padding: 0;
-  border-bottom: 1px solid var(--rule);
-  padding-bottom: 26px;
+.finding-card {
+  background: #ffffff;
+  border: 1px solid var(--rule);
+  border-left-width: 4px;
+  border-radius: var(--radius-md);
+  padding: 16px 18px;
+  box-shadow: var(--shadow-card);
+  transition: all 120ms ease;
 }
 
-.finding:last-child { border-bottom: none; padding-bottom: 0; }
+.finding-card:hover {
+  border-color: var(--rule-strong);
+  box-shadow: var(--shadow-hover);
+}
 
-.finding-head {
+.finding-card.finding-high {
+  border-left-color: var(--sev-high-bar);
+}
+
+.finding-card.finding-medium {
+  border-left-color: var(--sev-med-bar);
+}
+
+.finding-card.finding-low {
+  border-left-color: var(--sev-low-bar);
+}
+
+.finding-card-top {
   display: flex;
-  gap: 10px;
-  align-items: baseline;
-  margin-bottom: 14px;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
 }
 
-/* The index is a quiet ordinal, not a badge competing with the clause. */
-.finding-num {
-  font-family: var(--font-data);
-  font-size: 0.7rem;
+.finding-badge-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sev-pill {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.sev-pill-high {
+  background: var(--sev-high-bg);
+  color: var(--sev-high-ink);
+  border: 1px solid var(--sev-high-bdr);
+}
+
+.sev-pill-medium {
+  background: var(--sev-med-bg);
+  color: var(--sev-med-ink);
+  border: 1px solid var(--sev-med-bdr);
+}
+
+.sev-pill-low {
+  background: var(--sev-low-bg);
+  color: var(--sev-low-ink);
+  border: 1px solid var(--sev-low-bdr);
+}
+
+.family-tag {
+  font-size: 0.75rem;
   color: var(--ink-faint);
-  flex-shrink: 0;
-  padding-top: 2px;
+  font-weight: 500;
 }
 
-.finding-titles {
-  min-width: 0;
+.finding-num-tag {
+  font-family: var(--font-data);
+  font-size: 0.72rem;
+  color: var(--ink-faint);
+  font-weight: 500;
 }
 
 .finding-title {
   font-family: var(--font-ui);
-  font-size: 1rem;
+  font-size: 0.95rem;
   font-weight: 600;
   color: var(--ink);
-  line-height: 1.3;
-  letter-spacing: -0.005em;
+  margin: 0 0 10px;
 }
 
-.finding-family {
-  font-size: 0.78rem;
-  color: var(--ink-faint);
-  margin-top: 3px;
+.finding-quote-box {
+  background: #f8fafc;
+  border: 1px solid #f1f5f9;
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
 }
 
-/* Severity is a word, not a colour wash, so it survives greyscale and
-   colour blindness. Colour is additive reinforcement only. */
-.sev {
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  font-size: 0.7rem;
-}
-
-.sev-high { color: #a4262c; }
-.sev-medium { color: #8a5a00; }
-.sev-low { color: #5b6b7f; }
-
-/* No opening-quote glyph: Newsreader draws " as a 9px hairline at display
-   size, which reads as a stray vertical bar rather than a quotation mark.
-   The serif at reading size already marks this as lifted contract text. */
 .finding-quote {
-  margin: 0 0 14px;
-  padding: 0;
-  background: none;
   font-family: var(--font-doc);
-  font-size: 1.12rem;
+  font-size: 0.95rem;
   line-height: 1.55;
-  color: var(--ink);
-  max-width: 60ch;
-}
-
-.finding-detail {
+  color: #1e293b;
   margin: 0;
-  font-size: 0.88rem;
-  line-height: 1.62;
-  color: var(--ink-soft);
-  max-width: 66ch;
+  font-style: normal;
 }
 
-/* ---------- Empty / notice ---------- */
-
-.empty {
-  padding: 40px 0;
-  max-width: 46ch;
+.finding-impact-box {
+  font-size: 0.82rem;
+  color: #475569;
+  line-height: 1.55;
 }
 
-.empty-title {
-  font-family: var(--font-doc);
-  font-size: 1.16rem;
-  font-weight: 500;
-  color: var(--ink);
-  margin: 0 0 8px;
-}
-
-.empty-body {
-  font-size: 0.88rem;
-  line-height: 1.62;
-  color: var(--ink-soft);
-  margin: 0;
-}
-
-.notice {
-  border-left: 2px solid var(--accent);
-  padding-left: 18px;
-}
-.notice-error .empty-title { color: var(--accent); }
-
-/* ---------- Ledger ---------- */
-
-.ledger-intro {
-  max-width: 62ch;
-  margin: 0 0 32px;
-}
-
-.ledger-intro h2 {
-  font-family: var(--font-doc);
-  font-size: 1.4rem;
+.impact-lead {
   font-weight: 600;
-  letter-spacing: -0.01em;
-  margin: 0 0 8px;
   color: var(--ink);
+  margin-right: 4px;
 }
 
-.ledger-intro p {
-  font-size: 0.9rem;
-  line-height: 1.65;
-  color: var(--ink-soft);
-  margin: 0;
-}
+/* ---------- Empty State & Clean State Cards ---------- */
 
-.gr-dataframe {
-  border: 1px solid var(--rule) !important;
-  border-radius: var(--radius) !important;
-  overflow: hidden;
-}
-
-.gr-dataframe table {
-  font-family: var(--font-data) !important;
-  font-size: 0.8rem !important;
-  font-variant-numeric: tabular-nums;
-}
-
-.gr-dataframe th {
-  background: var(--paper-sunk) !important;
-  color: var(--ink-soft) !important;
-  font-weight: 500 !important;
-  border-bottom: 1px solid var(--rule-strong) !important;
-}
-
-.gr-dataframe td {
-  border-bottom: 1px solid var(--rule) !important;
-  color: var(--ink-soft) !important;
-}
-
-.hpo-block {
-  margin-top: 40px;
-  padding-top: 32px;
-  border-top: 1px solid var(--rule);
-}
-
-.hpo-head {
+.empty-state-card, .clean-state-card {
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: var(--gap);
-  flex-wrap: wrap;
-  margin-bottom: 20px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 48px 32px;
+  background: #f8fafc;
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--radius-md);
+  margin-bottom: 12px;
 }
 
-.hpo-head h3 {
-  font-family: var(--font-doc);
+.empty-icon-wrap, .clean-icon-wrap {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 1px solid var(--rule);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 16px;
+  color: var(--ink-faint);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.clean-icon-wrap {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+  color: #16a34a;
+}
+
+.empty-title, .clean-title {
+  font-family: var(--font-ui);
   font-size: 1.12rem;
   font-weight: 600;
-  margin: 0;
   color: var(--ink);
+  margin: 0 0 8px;
 }
 
-.hpo-head p {
-  font-size: 0.82rem;
+.empty-body, .clean-body {
+  font-family: var(--font-ui);
+  font-size: 0.88rem;
   color: var(--ink-faint);
-  margin: 0;
+  line-height: 1.6;
+  max-width: 48ch;
+  margin: 0 0 20px;
 }
 
-.compare-grid > div { min-width: 0; }
+.empty-tips {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
 
-/* Four equal lanes on desktop so every model gets the same reading width;
-   they stay equal as the viewport narrows. */
+.tip-item {
+  font-size: 0.76rem;
+  font-weight: 500;
+  color: var(--ink-soft);
+  background: #ffffff;
+  border: 1px solid var(--rule);
+  padding: 4px 10px;
+  border-radius: 20px;
+}
+
+.tip-dot {
+  color: #2563eb;
+  font-size: 0.7rem;
+  margin-right: 4px;
+}
+
+/* ---------- Multi-Model Comparison Grid ---------- */
+
 .compare-grid {
   display: grid !important;
   grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
@@ -1317,9 +1429,6 @@ input[type=range] { accent-color: var(--accent) !important; }
   .compare-grid { grid-template-columns: minmax(0, 1fr) !important; }
 }
 
-/* The comparison panels use the same HighlightedText treatment as the main
-   workspace, so they need the same wrapping fix even though they do not carry
-   the .highlighted-text elem class. */
 .compare-grid .token,
 .compare-grid .token-container,
 .compare-grid .text,
@@ -1331,12 +1440,6 @@ input[type=range] { accent-color: var(--accent) !important; }
   font-family: var(--font-doc) !important;
   font-size: 0.95rem !important;
   line-height: 1.7 !important;
-}
-
-.compare-hint {
-  font-size: 0.78rem;
-  color: var(--ink-faint);
-  margin: 0 0 12px;
 }
 
 .model-head {
@@ -1351,7 +1454,7 @@ input[type=range] { accent-color: var(--accent) !important; }
 
 .model-name {
   font-family: var(--font-ui);
-  font-size: 0.85rem;
+  font-size: 0.86rem;
   font-weight: 600;
   color: var(--ink);
 }
@@ -1363,33 +1466,17 @@ input[type=range] { accent-color: var(--accent) !important; }
   font-variant-numeric: tabular-nums;
 }
 
-/* ---------- Responsive ---------- */
-
-@media (max-width: 900px) {
-  .gradio-container { padding: 0 16px 56px !important; }
-  .gradio-container > .main { max-width: none; }
-  .masthead { padding: 28px 0 18px; margin-bottom: 24px; }
-  .masthead-note { text-align: left; max-width: none; }
-  .doc-pane { padding: 18px; min-height: 0; }
-  .highlighted-text { font-size: 1rem !important; }
-  .tabs > .tab-wrapper > .tab-container { gap: 18px !important; }
-  .preset-bar { max-width: none; }
+/* Hide Gradio internal progress indicators */
+.progress-text, [class*="progress-text"], .wrap.full.translucent {
+  display: none !important;
 }
 
-/* ---------- Motion ---------- */
-
-/* Gradio's component stylesheet is injected after this block and sets
-   flex-grow on the textarea, so the mobile reset has to come last to win.
-
-   The selector is deliberately short: Gradio rewrites custom CSS with a
-   scoped prefix and will happily produce an unmatchable descendant chain
-   if the rule names .gradio-container itself. */
+/* Responsive */
 @media (max-width: 900px) {
-  .contract-input textarea {
-    flex: 0 0 auto !important;
-    min-height: 0 !important;
-    height: 220px !important;
-  }
+  .gradio-container { padding: 0 16px 56px !important; }
+  .workspace-row { flex-direction: column !important; }
+  .masthead { padding: 20px 0 16px; margin-bottom: 20px; }
+  .contract-input textarea { min-height: 220px !important; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1399,45 +1486,39 @@ input[type=range] { accent-color: var(--accent) !important; }
 
 
 # ---------------------------------------------------------------------------
-# UI
+# UI Theme & Tokens
 # ---------------------------------------------------------------------------
 
 gr_version_str = getattr(gr, "__version__", "4.0.0")
 gr_major = int(gr_version_str.split(".")[0]) if gr_version_str and gr_version_str[0].isdigit() else 4
 
-# Paper surface, reviewer's red ink, and the same tokens applied to Gradio's
-# dark variants so the app reads identically whichever mode the browser picks.
-PAPER = "#fbfaf8"
+PAPER = "#f8fafc"
 SURFACE = "#ffffff"
-INK = "#1c1a17"
-INK_SOFT = "#56514a"
-INK_FAINT = "#6f6a60"
-RULE = "#e5e1da"
-RULE_STRONG = "#d3cec4"
-SUNK = "#f4f2ee"
-ACCENT = "#a4262c"
-ACCENT_HOVER = "#8f1f24"
+INK = "#0f172a"
+INK_SOFT = "#334155"
+INK_FAINT = "#64748b"
+RULE = "#e2e8f0"
+RULE_STRONG = "#cbd5e1"
+SUNK = "#f1f5f9"
+ACCENT = "#0f172a"
+ACCENT_HOVER = "#1e293b"
 
 
 def build_theme():
-    """Configure Gradio's token set for both light and dark appearances.
-
-    Gradio 6 ships component stylesheets after the custom CSS block, so
-    setting the theme at construction time is what actually wins the cascade.
-    """
+    """Configure Gradio's token set with modern slate legal-tech appearance."""
     theme = gr.themes.Base()
     ramp = {
         "neutral_50": SURFACE,
         "neutral_100": SUNK,
         "neutral_200": RULE,
         "neutral_300": RULE_STRONG,
-        "neutral_400": "#b5afa4",
+        "neutral_400": "#94a3b8",
         "neutral_500": INK_FAINT,
-        "neutral_600": "#6f6a60",
+        "neutral_600": "#475569",
         "neutral_700": INK_SOFT,
-        "neutral_800": "#3a3630",
-        "neutral_900": "#2a2724",
-        "neutral_950": INK,
+        "neutral_800": "#1e293b",
+        "neutral_900": INK,
+        "neutral_950": "#020617",
     }
     for name, value in ramp.items():
         setattr(theme, name, value)
@@ -1470,8 +1551,8 @@ def build_theme():
         "table_background_fill": SURFACE,
         "table_even_background_fill": PAPER,
         "table_odd_background_fill": SURFACE,
-        "color_accent": ACCENT,
-        "color_accent_soft": "#fdf3f3",
+        "color_accent": "#2563eb",
+        "color_accent_soft": "#eff6ff",
         "checkbox_background_fill": SURFACE,
         "block_label_text_color": INK,
         "block_info_text_color": INK_FAINT,
@@ -1485,7 +1566,7 @@ def build_theme():
 
     for name, value in {
         "block_label_text_size": "0.78rem",
-        "block_label_text_weight": 500,
+        "block_label_text_weight": 600,
         "block_info_text_size": "0.74rem",
         "block_info_text_weight": 400,
     }.items():
@@ -1511,14 +1592,29 @@ with gr.Blocks(**blocks_kwargs) as demo:
 
     gr.HTML(f"<style>{CUSTOM_CSS}</style>", visible=False)
 
-    # Masthead — identity only, no telemetry theatre
+    # Masthead — modern legal auditor navigation
     gr.HTML("""
     <header class="masthead">
-      <div class="masthead-brand">
-        <span class="wordmark">Gotcha</span>
-        <span class="wordmark-sub">clause extractor</span>
+      <div class="masthead-left">
+        <div class="masthead-logo-shield">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+          </svg>
+        </div>
+        <div class="masthead-title-wrap">
+          <div class="masthead-brand-line">
+            <span class="brand-title">GOTCHA</span>
+            <span class="brand-tag">LEGAL AUDITOR</span>
+          </div>
+          <p class="brand-subtitle">Automated Terms of Service & EULA Predatory Clause Extractor</p>
+        </div>
       </div>
-      <p class="masthead-note">Reads a contract and marks the clauses that cost you rights.</p>
+      <div class="masthead-right">
+        <div class="status-badge">
+          <span class="status-pulse-dot"></span>
+          <span class="status-badge-text">4 Fine-Tuned Models Online</span>
+        </div>
+      </div>
     </header>
     """)
 
@@ -1530,31 +1626,38 @@ with gr.Blocks(**blocks_kwargs) as demo:
         with gr.TabItem("Review a contract"):
 
             with gr.Row(elem_classes=["preset-bar"]):
-                gr.HTML('<span class="preset-label">Load an example</span>')
-                btn_arb = gr.Button("Forced arbitration", size="sm", elem_classes=["preset-btn"])
-                btn_surv = gr.Button("Data brokerage", size="sm", elem_classes=["preset-btn"])
-                btn_mut = gr.Button("Unilateral change", size="sm", elem_classes=["preset-btn"])
+                gr.HTML("""
+                <div class="preset-label-wrap">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+                  <span class="preset-label">Sample Agreements</span>
+                </div>
+                """)
+                btn_arb = gr.Button("Forced Arbitration", size="sm", elem_classes=["preset-btn"])
+                btn_surv = gr.Button("Data Brokerage", size="sm", elem_classes=["preset-btn"])
+                btn_mut = gr.Button("Unilateral Change", size="sm", elem_classes=["preset-btn"])
                 btn_ind = gr.Button("Indemnification", size="sm", elem_classes=["preset-btn"])
-                btn_safe = gr.Button("Clean policy", size="sm", elem_classes=["preset-btn"])
+                btn_safe = gr.Button("Clean Policy", size="sm", elem_classes=["preset-btn"])
 
-            with gr.Row():
+            with gr.Row(elem_classes=["workspace-row"]):
                 # Input column
-                with gr.Column(scale=5):
+                with gr.Column(scale=5, elem_classes=["workspace-card", "input-card"]):
+                    gr.HTML("""
+                    <div class="card-header">
+                      <div class="card-title-group">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                        <h3 class="card-heading">Contract Text</h3>
+                      </div>
+                      <span class="card-tag">ToS / EULA</span>
+                    </div>
+                    """)
                     text_input = gr.Textbox(
-                        # Gradio writes the row count to an inline height on the
-                        # textarea, which outranks any CSS height. A taller row
-                        # count is therefore what actually makes the field fill
-                        # the column; the flex rules below only stop it from
-                        # being clipped when the column shrinks on mobile.
-                        lines=26,
+                        lines=18,
                         label="Contract text",
-                        placeholder="Paste the terms of service, privacy policy, or EULA to review...",
+                        show_label=False,
+                        placeholder="Paste terms of service, privacy policy, or EULA text here...",
                         elem_classes=["contract-input"]
                     )
-                    # Stacked rather than side by side: at this column width the
-                    # slider label wrapped to three lines and the two controls
-                    # looked like competing peers instead of settings.
-                    with gr.Row(elem_classes=["control-row"]):
+                    with gr.Row(elem_classes=["control-box"]):
                         model_dropdown = gr.Dropdown(
                             choices=AVAILABLE_MODELS,
                             value="electra-small",
@@ -1567,22 +1670,23 @@ with gr.Blocks(**blocks_kwargs) as demo:
                             step=1,
                             value=3,
                             label="Sensitivity",
-                            info="Risk sub-words to flag"
+                            info="Risk token threshold"
                         )
-                    analyze_btn = gr.Button("Review contract", variant="primary", elem_classes=["btn-primary"])
+                    analyze_btn = gr.Button("Review Contract", variant="primary", elem_classes=["btn-primary"])
 
                 # Output column
-                with gr.Column(scale=7, elem_classes=["results-col"]):
+                with gr.Column(scale=7, elem_classes=["workspace-card", "results-col"]):
                     summary_output = gr.HTML(empty_state(False))
-                    # The marked-up text is the proof the classifier worked, so
-                    # it leads the results. The findings below explain it.
                     annotated_label = gr.HTML(f"""
-                    <div class="doc-head">
-                      <p class="doc-label">The contract, marked</p>
-                      <div class="legend">
-                        <div class="legend-item"><span class="legend-swatch" style="background:{RISK_INK['HIGH RISK']}"></span>High</div>
-                        <div class="legend-item"><span class="legend-swatch" style="background:{RISK_INK['MEDIUM RISK']}"></span>Medium</div>
-                        <div class="legend-item"><span class="legend-swatch" style="background:{RISK_INK['LOW RISK']}"></span>Low</div>
+                    <div class="doc-viewer-header">
+                      <div class="doc-viewer-title">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                        <span>Marked Agreement Document</span>
+                      </div>
+                      <div class="legend-row">
+                        <span class="legend-chip legend-high"><span class="legend-indicator"></span>High Risk</span>
+                        <span class="legend-chip legend-med"><span class="legend-indicator"></span>Medium</span>
+                        <span class="legend-chip legend-low"><span class="legend-indicator"></span>Low</span>
                       </div>
                     </div>
                     """, visible=False)
@@ -1594,7 +1698,7 @@ with gr.Blocks(**blocks_kwargs) as demo:
                         show_inline_category=False,
                         visible=False,
                         color_map=COLOR_MAP,
-                        elem_classes=["highlighted-text"]
+                        elem_classes=["highlighted-text", "doc-reader-scroll"]
                     )
                     findings_output = gr.HTML("")
 
