@@ -610,19 +610,20 @@ body.dark, :root.dark, .dark {
 
 /* ---------- Shell & Layout ---------- */
 
-.gradio-container {
+.gradio-container, [class*="gradio-container"] {
   background: var(--paper) !important;
   color: var(--ink) !important;
   font-family: var(--font-ui) !important;
   max-width: none !important;
   min-height: 100% !important;
   overflow: visible !important;
+  overflow-y: visible !important;
   padding: 0 32px 72px !important;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-.gradio-container > .main {
+.gradio-container > .main, [class*="gradio-container"] > .main {
   max-width: 1440px;
   margin-inline: auto;
   width: 100%;
