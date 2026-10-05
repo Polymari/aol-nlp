@@ -21,6 +21,11 @@ import random
 import shutil
 import argparse
 import datetime
+import time
+try:
+    import psutil
+except ImportError:
+    psutil = None
 from typing import Dict, Any, List, Optional
 
 import numpy as np
@@ -175,15 +180,33 @@ def build_unified_dataset(synthetic_path="corpus/synthetic_gotchas.json", seed=4
     raw_original_dataset = Dataset.from_list(standardized_data)
     dataset_splits = raw_original_dataset.train_test_split(test_size=0.15, seed=seed)
 
-    # 3. Augment Train Split Exclusively with Synthetic Gotchas
+    # 3. Augment Train Split Exclusively with Synthetic Gotchas & Legal Prefix Noise
     if os.path.exists(synthetic_path):
         print(f"Merging synthetic gotchas from {synthetic_path} strictly into train split...")
         try:
             with open(synthetic_path, "r", encoding="utf-8") as f:
                 synthetic_data = json.load(f)
-            synthetic_dataset = Dataset.from_list(synthetic_data)
+
+            # Prefix noise augmentation: prepend numbering / section headers to a subset of samples
+            # Teaches the token classifier that leading legal numbering prefixes are strictly 'O'
+            random.seed(seed)
+            legal_prefixes = [
+                "1. ", "2. ", "12. ", "14.1 ", "Section 4. ", "Section 12. ",
+                "Article III: ", "Clause 2 - ", "(a) ", "(b) ", "[i] ", "[ii] "
+            ]
+            augmented_samples = []
+            for item in synthetic_data:
+                augmented_samples.append(item)
+                if random.random() < 0.15:
+                    pfx = random.choice(legal_prefixes)
+                    augmented_samples.append({
+                        "text": pfx + item["text"],
+                        "gotchas": item.get("gotchas", [])
+                    })
+
+            synthetic_dataset = Dataset.from_list(augmented_samples)
             dataset_splits["train"] = concatenate_datasets([dataset_splits["train"], synthetic_dataset])
-            print(f"  Added {len(synthetic_data)} synthetic samples. Train split size: {len(dataset_splits['train'])}")
+            print(f"  Added {len(augmented_samples)} synthetic & prefix-augmented samples. Train split size: {len(dataset_splits['train'])}")
         except Exception as e:
             print(f"  Warning loading synthetic data: {e}")
 
@@ -271,13 +294,34 @@ class WeightedLossTrainer(Trainer):
 
 
 class ComprehensiveMetricsCallback(TrainerCallback):
-    """Collects and displays epoch metrics for both HPO search trials and final training."""
-    def __init__(self, mode="final"):
+    """Collects and displays rich training telemetry:
+    - F1, Precision, Recall, Accuracy, Train & Eval Loss, Learning Rate
+    - Hardware Telemetry: Live & Peak VRAM allocated/reserved (MB/GB), GPU utilization %, Process & System RAM
+    - Performance Telemetry: Throughput (samples/sec), epoch duration, ETA
+    """
+    def __init__(self, mode="final", total_train_samples=0, num_epochs=10):
         self.mode = mode
+        self.total_train_samples = total_train_samples
+        self.num_epochs = num_epochs
         self.history = {}
         self.trials_history = {}
         self.current_trial = 0
         self.current_trial_epochs = {}
+        self.train_start_time = None
+        self.epoch_start_time = None
+        self.epoch_durations = []
+        self.peak_vram_allocated_mb = 0.0
+        self.peak_vram_reserved_mb = 0.0
+        self.peak_process_ram_mb = 0.0
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.train_start_time = time.time()
+        self.epoch_start_time = time.time()
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        self.epoch_start_time = time.time()
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         if not logs:
@@ -306,22 +350,81 @@ class ComprehensiveMetricsCallback(TrainerCallback):
         if "learning_rate" in logs:
             entry["Learning_Rate"] = round(float(logs["learning_rate"]), 7)
 
+        now = time.time()
+        epoch_dur = max(0.1, now - (self.epoch_start_time or now))
+        entry["Epoch_Duration_Sec"] = round(epoch_dur, 2)
+        if self.total_train_samples > 0:
+            entry["Samples_Per_Sec"] = round(self.total_train_samples / epoch_dur, 1)
+
+        # Hardware & VRAM Telemetry
+        if torch.cuda.is_available():
+            alloc_mb = torch.cuda.memory_allocated() / (1024 ** 2)
+            max_alloc_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
+            res_mb = torch.cuda.memory_reserved() / (1024 ** 2)
+            max_res_mb = torch.cuda.max_memory_reserved() / (1024 ** 2)
+            total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            entry["VRAM_Allocated_MB"] = round(alloc_mb, 1)
+            entry["VRAM_Peak_Allocated_MB"] = round(max_alloc_mb, 1)
+            entry["VRAM_Reserved_MB"] = round(res_mb, 1)
+            entry["VRAM_Peak_Reserved_MB"] = round(max_res_mb, 1)
+            entry["VRAM_Peak_GB"] = round(max_res_mb / 1024, 2)
+            entry["VRAM_Util_Pct"] = round((max_res_mb / (total_vram_gb * 1024)) * 100, 1)
+            self.peak_vram_allocated_mb = max(self.peak_vram_allocated_mb, max_alloc_mb)
+            self.peak_vram_reserved_mb = max(self.peak_vram_reserved_mb, max_res_mb)
+
+        if psutil is not None:
+            try:
+                proc_ram_mb = psutil.Process().memory_info().rss / (1024 ** 2)
+                entry["Process_RAM_MB"] = round(proc_ram_mb, 1)
+                self.peak_process_ram_mb = max(self.peak_process_ram_mb, proc_ram_mb)
+            except Exception:
+                pass
+
         if "eval_f1" in logs:
-            prefix = f"  [Trial {self.current_trial + 1} | Ep {ep}]" if self.mode == "trial" else f"  [Epoch {ep}/{int(args.num_train_epochs)}]"
+            total_epochs = int(args.num_train_epochs) if args.num_train_epochs else self.num_epochs
+            self.epoch_durations.append(epoch_dur)
+            avg_dur = sum(self.epoch_durations) / len(self.epoch_durations)
+            remaining_eps = max(0, total_epochs - ep)
+            eta_sec = int(remaining_eps * avg_dur)
+            eta_str = f"{eta_sec // 60}m {eta_sec % 60:02d}s" if eta_sec >= 60 else f"{eta_sec}s"
+
+            prefix = f"  [Trial {self.current_trial + 1} | Ep {ep}/{total_epochs}]" if self.mode == "trial" else f"  [Epoch {ep}/{total_epochs}]"
             train_l = entry.get("Train_Loss", "—")
             eval_l = entry.get("Eval_Loss", "—")
             f1 = entry.get("F1", 0.0)
             prec = entry.get("Precision", 0.0)
             rec = entry.get("Recall", 0.0)
-            print(f"{prefix} Train Loss: {train_l} | Eval Loss: {eval_l} | F1: {f1:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f}")
+            samples_s = entry.get("Samples_Per_Sec", "—")
+
+            if torch.cuda.is_available():
+                peak_gb = entry.get("VRAM_Peak_GB", 0.0)
+                tot_gb = total_vram_gb
+                util_pct = entry.get("VRAM_Util_Pct", 0.0)
+                vram_info = f"VRAM: {entry.get('VRAM_Allocated_MB', 0):,.0f} MB alloc / {entry.get('VRAM_Peak_Reserved_MB', 0):,.0f} MB peak ({peak_gb:.2f} GB / {tot_gb:.2f} GB, {util_pct:.1f}%)"
+            else:
+                proc_ram = entry.get("Process_RAM_MB", 0.0)
+                vram_info = f"RAM: {proc_ram:,.0f} MB process"
+
+            print(f"{prefix} Train: {train_l} | Eval: {eval_l} | F1: {f1:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f}")
+            print(f"      {vram_info} | {samples_s} samples/s | Ep: {epoch_dur:.1f}s | ETA: {eta_str}")
+            self.epoch_start_time = time.time()
 
     def on_train_end(self, args, state, control, **kwargs):
         if self.mode == "trial":
             if self.current_trial_epochs:
                 sorted_epochs = [self.current_trial_epochs[k] for k in sorted(self.current_trial_epochs.keys())]
-                self.trials_history[self.current_trial] = sorted_epochs
+                self.trials_history[self.current_trial] = {
+                    "epochs": sorted_epochs,
+                    "peak_vram_mb": round(self.peak_vram_reserved_mb, 1),
+                    "peak_vram_gb": round(self.peak_vram_reserved_mb / 1024, 2),
+                    "peak_allocated_mb": round(self.peak_vram_allocated_mb, 1),
+                    "trial_duration_sec": round(time.time() - (self.train_start_time or time.time()), 1)
+                }
                 self.current_trial += 1
                 self.current_trial_epochs = {}
+                self.epoch_durations = []
+                self.peak_vram_allocated_mb = 0.0
+                self.peak_vram_reserved_mb = 0.0
 
     def get_final_history_list(self):
         return [self.history[k] for k in sorted(self.history.keys())]
@@ -331,6 +434,9 @@ class ComprehensiveMetricsCallback(TrainerCallback):
         self.trials_history = {}
         self.current_trial = 0
         self.current_trial_epochs = {}
+        self.epoch_durations = []
+        self.peak_vram_allocated_mb = 0.0
+        self.peak_vram_reserved_mb = 0.0
 
 
 def compute_metrics(p):
@@ -515,7 +621,11 @@ def train_single_model(
     if use_optuna:
         print(f"\n--- Running Optuna Hyperparameter Search ({n_trials} trials, {epochs} epochs each) ---")
         search_dir = os.path.join(output_base_dir, f"{model_key}-optuna-search")
-        trial_metrics_cb = ComprehensiveMetricsCallback(mode="trial")
+        trial_metrics_cb = ComprehensiveMetricsCallback(
+            mode="trial",
+            total_train_samples=len(tokenized_train),
+            num_epochs=epochs
+        )
 
         trial_records = {}
 
@@ -599,7 +709,8 @@ def train_single_model(
         trials_dict = {}
         for trial_num, rec in trial_records.items():
             t_key = str(trial_num + 1)
-            epoch_records = trial_metrics_cb.trials_history.get(trial_num, [])
+            trial_bundle = trial_metrics_cb.trials_history.get(trial_num, {})
+            epoch_records = trial_bundle.get("epochs", [])
 
             epochs_list = [e.get("Epoch") for e in epoch_records]
             f1s_list = [e.get("F1", 0.0) for e in epoch_records]
@@ -608,6 +719,15 @@ def train_single_model(
             precs = [e.get("Precision", 0.0) for e in epoch_records]
             recs = [e.get("Recall", 0.0) for e in epoch_records]
             accs = [e.get("Accuracy", 0.0) for e in epoch_records]
+            vram_allocs = [e.get("VRAM_Allocated_MB", 0.0) for e in epoch_records]
+            vram_reserves = [e.get("VRAM_Reserved_MB", 0.0) for e in epoch_records]
+            speeds = [e.get("Samples_Per_Sec", 0.0) for e in epoch_records if e.get("Samples_Per_Sec")]
+            avg_speed = round(sum(speeds) / len(speeds), 1) if speeds else 0.0
+
+            trial_dur = trial_bundle.get("trial_duration_sec", 0.0)
+            m_dur = int(trial_dur // 60)
+            s_dur = int(trial_dur % 60)
+            formatted_dur = f"{m_dur}m {s_dur:02d}s" if m_dur > 0 else f"{s_dur}s"
 
             best_trial_f1 = max(f1s_list) if f1s_list else 0.0
 
@@ -616,6 +736,11 @@ def train_single_model(
                 "state": "COMPLETE",
                 "params": rec["params"],
                 "best_f1": round(float(best_trial_f1), 4),
+                "peak_vram_mb": trial_bundle.get("peak_vram_mb", 0.0),
+                "peak_vram_gb": trial_bundle.get("peak_vram_gb", 0.0),
+                "avg_samples_per_sec": avg_speed,
+                "trial_duration_sec": trial_dur,
+                "formatted_duration": formatted_dur,
                 "epochs": epochs_list,
                 "f1": f1s_list,
                 "loss": eval_losses,
@@ -624,6 +749,8 @@ def train_single_model(
                 "precision": precs,
                 "recall": recs,
                 "accuracy": accs,
+                "vram_allocated_mb": vram_allocs,
+                "vram_reserved_mb": vram_reserves,
             }
 
         if os.path.exists(search_dir):
@@ -649,7 +776,11 @@ def train_single_model(
     total_params = sum(p.numel() for p in final_model.parameters())
     print(f"Model Parameters: {trainable_params:,} trainable / {total_params:,} total ({trainable_params / total_params * 100:.1f}%)")
 
-    final_metrics_cb = ComprehensiveMetricsCallback(mode="final")
+    final_metrics_cb = ComprehensiveMetricsCallback(
+        mode="final",
+        total_train_samples=len(tokenized_train),
+        num_epochs=epochs
+    )
 
     final_args = TrainingArguments(
         output_dir=output_dir,
@@ -668,6 +799,7 @@ def train_single_model(
         save_total_limit=1,
         warmup_ratio=best_hp.get("warmup_ratio", warmup_ratio),
         report_to="none",
+        fp16=True
     )
 
     final_trainer = WeightedLossTrainer(
@@ -715,6 +847,34 @@ def train_single_model(
     peak_f1 = max(final_f1) if final_f1 else best_f1
     peak_epoch = final_epochs[final_f1.index(peak_f1)] if final_f1 else None
 
+    final_dur = round(time.time() - (final_metrics_cb.train_start_time or time.time()), 1)
+    fm_dur = int(final_dur // 60)
+    fs_dur = int(final_dur % 60)
+    final_dur_str = f"{fm_dur}m {fs_dur:02d}s" if fm_dur > 0 else f"{fs_dur}s"
+    final_speeds = [h.get("Samples_Per_Sec", 0.0) for h in history if h.get("Samples_Per_Sec")]
+    avg_final_speed = round(sum(final_speeds) / len(final_speeds), 1) if final_speeds else 0.0
+
+    print("\n" + "=" * 65)
+    print(f"  TRAINING TELEMETRY SUMMARY: {model_key.upper()}")
+    print("=" * 65)
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        tot_vram = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        peak_alloc = final_metrics_cb.peak_vram_allocated_mb
+        peak_res = final_metrics_cb.peak_vram_reserved_mb
+        util = (peak_res / (tot_vram * 1024)) * 100
+        print(f"  Compute Device:          {gpu_name} ({tot_vram:.2f} GB VRAM)")
+        print(f"  Peak VRAM Allocated:     {peak_alloc:,.1f} MB ({peak_alloc / 1024:.2f} GB)")
+        print(f"  Peak VRAM Reserved:      {peak_res:,.1f} MB ({peak_res / 1024:.2f} GB, {util:.1f}% capacity)")
+    else:
+        print(f"  Compute Device:          CPU")
+    if psutil is not None:
+        print(f"  Peak Process RAM:        {final_metrics_cb.peak_process_ram_mb:,.1f} MB")
+    print(f"  Total Training Duration: {final_dur_str}")
+    print(f"  Average Epoch Duration:  {final_dur / max(1, len(final_epochs)):.1f}s")
+    print(f"  Average Throughput:      {avg_final_speed} samples/sec")
+    print("=" * 65)
+
     metrics_data = {
         "model_info": {
             "name": model_key,
@@ -722,6 +882,7 @@ def train_single_model(
             "total_parameters": total_params,
             "trainable_parameters": trainable_params,
             "device": device,
+            "device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU",
             "timestamp": datetime.datetime.now().isoformat()
         },
         "best_hp": {
@@ -731,6 +892,27 @@ def train_single_model(
             "batch_size": best_hp.get("per_device_train_batch_size", batch_size),
             "warmup_ratio": best_hp.get("warmup_ratio"),
             "best_f1": round(float(peak_f1), 4)
+        },
+        "hardware_telemetry": {
+            "device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU",
+            "cuda_available": torch.cuda.is_available(),
+            "total_vram_gb": round(torch.cuda.get_device_properties(0).total_memory / (1024 ** 3), 2) if torch.cuda.is_available() else 0.0,
+            "peak_vram_allocated_mb": round(final_metrics_cb.peak_vram_allocated_mb, 1),
+            "peak_vram_allocated_gb": round(final_metrics_cb.peak_vram_allocated_mb / 1024, 2),
+            "peak_vram_reserved_mb": round(final_metrics_cb.peak_vram_reserved_mb, 1),
+            "peak_vram_reserved_gb": round(final_metrics_cb.peak_vram_reserved_mb / 1024, 2),
+            "vram_utilization_pct": round((final_metrics_cb.peak_vram_reserved_mb / (torch.cuda.get_device_properties(0).total_memory / (1024 ** 2))) * 100, 1) if torch.cuda.is_available() else 0.0,
+            "total_system_ram_gb": round(psutil.virtual_memory().total / (1024 ** 3), 2) if psutil else 0.0,
+            "peak_process_ram_mb": round(final_metrics_cb.peak_process_ram_mb, 1)
+        },
+        "performance_telemetry": {
+            "total_train_samples": len(tokenized_train),
+            "total_test_samples": len(tokenized_test),
+            "total_epochs": epochs,
+            "total_duration_sec": final_dur,
+            "formatted_duration": final_dur_str,
+            "avg_samples_per_sec": avg_final_speed,
+            "epoch_durations_sec": [h.get("Epoch_Duration_Sec", 0.0) for h in history]
         },
         "trials": trials_dict,
         "final_run": {
@@ -742,7 +924,12 @@ def train_single_model(
             "precision": final_prec,
             "recall": final_rec,
             "accuracy": final_acc,
-            "learning_rate": final_lr
+            "learning_rate": final_lr,
+            "vram_allocated_mb": [h.get("VRAM_Allocated_MB", 0.0) for h in history],
+            "vram_reserved_mb": [h.get("VRAM_Reserved_MB", 0.0) for h in history],
+            "vram_peak_gb": [h.get("VRAM_Peak_GB", 0.0) for h in history],
+            "epoch_duration_sec": [h.get("Epoch_Duration_Sec", 0.0) for h in history],
+            "samples_per_sec": [h.get("Samples_Per_Sec", 0.0) for h in history]
         },
         "test_eval": test_eval,
         "summary": {
@@ -787,7 +974,25 @@ def main():
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Executing training pipeline on compute device: {device}")
+    print("\n" + "=" * 65)
+    print("  HARDWARE & SYSTEM TELEMETRY INITIALIZATION")
+    print("=" * 65)
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        props = torch.cuda.get_device_properties(0)
+        total_vram_gb = props.total_memory / (1024 ** 3)
+        cuda_arch = f"{props.major}.{props.minor}"
+        print(f"  Compute Device:     {gpu_name} (Arch: sm_{cuda_arch})")
+        print(f"  Total GPU VRAM:     {total_vram_gb:.2f} GB ({props.total_memory // (1024 ** 2):,} MB)")
+        print(f"  PyTorch CUDA:       {torch.version.cuda}")
+    else:
+        print(f"  Compute Device:     CPU (CUDA not available)")
+
+    if psutil is not None:
+        vm = psutil.virtual_memory()
+        print(f"  System Total RAM:   {vm.total / (1024 ** 3):.2f} GB ({vm.percent}% in use)")
+        print(f"  CPU Cores:          {psutil.cpu_count(logical=True)} logical ({psutil.cpu_count(logical=False)} physical)")
+    print("=" * 65)
 
     # Build dataset
     splits = build_unified_dataset(synthetic_path=args.synthetic_path, seed=args.seed)
@@ -804,6 +1009,7 @@ def main():
 
     if args.dry_run:
         print("\n*** DRY RUN MODE: Truncating splits to 16 train / 8 test samples for fast verification ***")
+        args.output_dir = "./tmp_dry_run"
         splits["train"] = splits["train"].select(range(min(16, len(splits["train"]))))
         splits["test"] = splits["test"].select(range(min(8, len(splits["test"]))))
         args.epochs = 2

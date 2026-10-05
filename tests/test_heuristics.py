@@ -73,3 +73,15 @@ def test_determine_risk_level():
 
     low_tokens = [{"token": "term", "prob": 0.52}]
     assert determine_risk_level("text", low_tokens, has_high_kw=False) == "LOW RISK"
+
+
+def test_metadata_and_date_headers_suppressed():
+    """Verify that document titles, date metadata, and page numbers are cleanly recognized as boilerplate."""
+    assert clean_boilerplate_header("TERMS OF SERVICE") is True
+    assert clean_boilerplate_header("Last Updated: January 15, 2024") is True
+    assert clean_boilerplate_header("Effective Date: 2024-01-01") is True
+    assert clean_boilerplate_header("Page 1 of 12") is True
+    assert clean_boilerplate_header("— 4 —") is True
+    assert clean_boilerplate_header("1. Acceptance of Terms") is True
+    assert clean_boilerplate_header("Section 4. Updates to Service") is True
+

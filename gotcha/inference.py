@@ -131,8 +131,10 @@ def classify_text(
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
-                max_length=512
+                max_length=512,
+                return_offsets_mapping=True
             )
+            raw_offsets = inputs.pop("offset_mapping").cpu().numpy()
             inputs = {k: v.to(device) for k, v in inputs.items()}
 
             with torch.no_grad():
@@ -144,19 +146,25 @@ def classify_text(
 
             for b_i, rec_idx in enumerate(b_indices):
                 sentence = b_sentences[b_i]
+                sent_offsets = raw_offsets[b_i]
                 sentence_tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][b_i])
                 seq_preds = predictions[b_i]
                 seq_probs = probs[b_i]
 
                 risk_tokens = []
+                risk_spans_raw = []
                 for t_idx, pred in enumerate(seq_preds):
                     token_str = sentence_tokens[t_idx]
                     if token_str in ('[CLS]', '[SEP]', '[PAD]', '<s>', '</s>', '<pad>'):
                         continue
                     label = id2label[pred.item()]
                     prob = seq_probs[t_idx][pred.item()].item()
+                    c_start, c_end = sent_offsets[t_idx]
+                    if c_start == c_end:
+                        continue
                     if label in ('B-RISK', 'I-RISK'):
                         risk_tokens.append({"token": token_str, "prob": prob})
+                        risk_spans_raw.append((int(c_start), int(c_end), prob))
 
                 # Determine if threshold is met
                 assigned_level = None
@@ -173,11 +181,44 @@ def classify_text(
                     if keep:
                         assigned_level = determine_risk_level(sentence, risk_tokens, has_high_kw)
 
-                # Update the record with assigned level (or None)
+                # Update the record with surgical spans (or neutral segment)
                 start_c, end_c, sent_c, _ = sentence_records[rec_idx]
-                sentence_records[rec_idx] = (start_c, end_c, sent_c, assigned_level)
+                if assigned_level is not None and risk_spans_raw:
+                    # Merge contiguous or adjacent spans (within 2 chars for spaces/punctuation)
+                    merged_spans = []
+                    cur_s, cur_e = risk_spans_raw[0][0], risk_spans_raw[0][1]
+                    for s, e, _ in risk_spans_raw[1:]:
+                        if s <= cur_e + 2:
+                            cur_e = max(cur_e, e)
+                        else:
+                            merged_spans.append((cur_s, cur_e))
+                            cur_s, cur_e = s, e
+                    merged_spans.append((cur_s, cur_e))
 
-    highlighted_data = [(rec[2], rec[3]) for rec in sentence_records]
+                    # Build surgical sub-segments for this sentence
+                    sub_segments = []
+                    last_pos = 0
+                    for ms, me in merged_spans:
+                        ms = max(0, min(ms, len(sentence)))
+                        me = max(ms, min(me, len(sentence)))
+                        if ms > last_pos:
+                            sub_segments.append((sentence[last_pos:ms], None))
+                        sub_segments.append((sentence[ms:me], assigned_level))
+                        last_pos = me
+                    if last_pos < len(sentence):
+                        sub_segments.append((sentence[last_pos:], None))
+
+                    sentence_records[rec_idx] = (start_c, end_c, sent_c, sub_segments)
+                else:
+                    sentence_records[rec_idx] = (start_c, end_c, sent_c, [(sent_c, None)])
+
+    highlighted_data = []
+    for rec in sentence_records:
+        val = rec[3]
+        if isinstance(val, list):
+            highlighted_data.extend(val)
+        else:
+            highlighted_data.append((rec[2], val))
     return highlighted_data
 
 

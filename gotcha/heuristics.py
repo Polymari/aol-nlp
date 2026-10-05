@@ -4,7 +4,11 @@ from .constants import (
     KEYWORDS_HIGH,
     BOILERPLATE_PATTERNS,
     KEYWORDS_PRO_USER,
-    WAIVER_HOSTILE_INDICATORS
+    WAIVER_HOSTILE_INDICATORS,
+    RE_DATE_METADATA_STR,
+    RE_DOC_TITLE_STR,
+    RE_PAGE_MARKERS_STR,
+    RE_LEGAL_PREFIX_STR
 )
 
 # Pre-compile regexes for high performance
@@ -12,6 +16,11 @@ RE_KEYWORDS_HIGH = [re.compile(p, re.IGNORECASE) for p in KEYWORDS_HIGH]
 RE_BOILERPLATE = [re.compile(p, re.IGNORECASE) for p in BOILERPLATE_PATTERNS]
 RE_PRO_USER = [re.compile(p, re.IGNORECASE) for p in KEYWORDS_PRO_USER]
 RE_WAIVER_HOSTILE = [re.compile(p, re.IGNORECASE) for p in WAIVER_HOSTILE_INDICATORS]
+
+RE_DATE_METADATA = re.compile(RE_DATE_METADATA_STR, re.IGNORECASE)
+RE_DOC_TITLE = re.compile(RE_DOC_TITLE_STR, re.IGNORECASE)
+RE_PAGE_MARKERS = re.compile(RE_PAGE_MARKERS_STR, re.IGNORECASE)
+RE_LEGAL_PREFIX = re.compile(RE_LEGAL_PREFIX_STR, re.IGNORECASE)
 
 RE_ALL_CAPS_HEADER = re.compile(r"^[A-Z\s\d/_:,\'\"]{3,50}$")
 RE_USER_RIGHTS_PATTERN = re.compile(
@@ -61,7 +70,7 @@ def check_pro_user_override(sentence: str) -> bool:
 
 
 def clean_boilerplate_header(sentence: str) -> bool:
-    """Identify if a sentence is non-informative boilerplate or a standard title header.
+    """Identify if a sentence is non-informative boilerplate, metadata, or a title header.
     
     Safety guard: If a short heading contains high-risk terms (e.g. ARBITRATION, DISPUTE),
     do NOT discard it.
@@ -70,7 +79,16 @@ def clean_boilerplate_header(sentence: str) -> bool:
     if not sentence_clean:
         return True
 
-    # Safety Guard: If high risk keyword is present, keep it even if uppercase
+    # 1. Structural document metadata, titles, page markers, and prefix fragments
+    if (
+        RE_DOC_TITLE.match(sentence_clean)
+        or RE_DATE_METADATA.match(sentence_clean)
+        or RE_PAGE_MARKERS.match(sentence_clean)
+        or RE_LEGAL_PREFIX.match(sentence_clean)
+    ):
+        return True
+
+    # 2. Safety Guard: If high risk keyword is present, keep it even if uppercase
     if has_high_risk_keyword(sentence_clean):
         return False
 

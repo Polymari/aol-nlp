@@ -69,12 +69,23 @@ def load_comprehensive_metrics():
         test_eval = data.get("test_eval", {})
         summary = data.get("summary", {})
 
+        hw = data.get("hardware_telemetry", {})
+        perf = data.get("performance_telemetry", {})
+        peak_vram_gb = hw.get("peak_vram_reserved_gb") or hw.get("peak_vram_gb")
+        avg_speed = perf.get("avg_samples_per_sec")
+        formatted_duration = perf.get("formatted_duration")
+
         trial_rows = []
         for t_num, t_info in trials.items():
             params = t_info.get("params", {})
             f1_val = t_info.get("best_f1")
             if f1_val is None and t_info.get("f1"):
                 f1_val = max(t_info["f1"])
+
+            t_vram = t_info.get("peak_vram_gb")
+            if t_vram is None and t_info.get("peak_vram_mb"):
+                t_vram = t_info["peak_vram_mb"] / 1024
+            t_speed = t_info.get("avg_samples_per_sec")
 
             trial_rows.append({
                 "Trial": t_num,
@@ -84,6 +95,8 @@ def load_comprehensive_metrics():
                 "Batch": str(params.get("per_device_train_batch_size", "—")),
                 "Warmup": f"{params['warmup_ratio'] * 100:.0f}%" if isinstance(params.get("warmup_ratio"), (int, float)) else "—",
                 "Frozen": str(params.get("num_frozen_layers", "—")),
+                "Peak VRAM": f"{t_vram:.2f} GB" if isinstance(t_vram, (int, float)) and t_vram > 0 else "—",
+                "Speed": f"{t_speed:.0f} s/s" if isinstance(t_speed, (int, float)) and t_speed > 0 else "—",
                 "_raw": float(f1_val) if isinstance(f1_val, (int, float)) else 0.0
             })
 
@@ -103,12 +116,17 @@ def load_comprehensive_metrics():
             "total_trials": len(trials),
             "desc": MODEL_META.get(m, {}).get("desc", ""),
             "params": MODEL_META.get(m, {}).get("params", "—"),
+            "peak_vram_gb": peak_vram_gb,
+            "avg_speed": avg_speed,
+            "duration": formatted_duration,
+            "device_name": hw.get("device_name", "GPU"),
         }
 
         epochs = final_run.get("epochs", [])
         f1s = final_run.get("f1", [])
         train_losses = final_run.get("train_loss", [])
         eval_losses = final_run.get("eval_loss", final_run.get("loss", []))
+        vram_peaks = final_run.get("vram_peak_gb", [])
         for i in range(len(epochs)):
             history_rows.append({
                 "Model": m,
@@ -116,11 +134,12 @@ def load_comprehensive_metrics():
                 "Validation F1": f1s[i] if i < len(f1s) else None,
                 "Training loss": train_losses[i] if i < len(train_losses) else None,
                 "Validation loss": eval_losses[i] if i < len(eval_losses) else None,
+                "VRAM (GB)": vram_peaks[i] if i < len(vram_peaks) else None,
             })
 
     metrics_df = pd.DataFrame(history_rows)
     if not history_rows:
-        metrics_df = pd.DataFrame(columns=["Model", "Epoch", "Validation F1", "Training loss", "Validation loss"])
+        metrics_df = pd.DataFrame(columns=["Model", "Epoch", "Validation F1", "Training loss", "Validation loss", "VRAM (GB)"])
     return metrics_df, optuna_trials_map, models_summary_map
 
 
@@ -149,17 +168,35 @@ COMPARE_PANELS = [
 def categorize_gotcha(sentence: str) -> dict:
     """Classify a flagged clause into one of the risk families the model detects."""
     s = sentence.lower()
-    if any(k in s for k in ("arbitrat", "class action", "jury", "court proceeding", "dispute")):
+    if any(k in s for k in ("train our", "train proprietary", "train commercial", "foundation model", "generative ai", "machine learning model", "neural network", "diffusion model", "model pre-training")):
+        return {
+            "title": "AI model training grab",
+            "family": "Intellectual property",
+            "detail": "Appropriates your uploaded content, prompts, or code to train and monetize commercial foundation AI models without compensation."
+        }
+    if any(k in s for k in ("arbitrat", "class action", "jury", "court proceeding", "dispute", "bellwether", "batched in")):
         return {
             "title": "Forced arbitration",
             "family": "Dispute resolution",
-            "detail": "Removes your access to court and to collective action, and routes disputes through private arbitration."
+            "detail": "Removes your access to court and to collective action, and routes disputes through private arbitration or batching protocols."
+        }
+    if any(k in s for k in ("biometric", "facial geometry", "voiceprint", "keystroke dynamics", "eye-tracking")):
+        return {
+            "title": "Biometric surveillance",
+            "family": "Privacy",
+            "detail": "Monetizes sensitive biometric identifiers, voiceprints, or behavioral keystroke telemetry with third-party brokers."
         }
     if any(k in s for k in ("sell", "broker", "advertis", "third part", "market your", "telemetry", "location data")):
         return {
             "title": "Data brokerage",
             "family": "Privacy",
             "detail": "Authorizes collecting and syndicating your activity to outside advertisers and data brokers."
+        }
+    if any(k in s for k in ("automatically renew", "auto-renew", "non-refundable", "certified postal mail", "cancellation consultation")):
+        return {
+            "title": "Predatory auto-renewal",
+            "family": "Billing & terms",
+            "detail": "Traps you in automatic renewal charges with strict non-refundability or onerous manual cancellation requirements."
         }
     if any(k in s for k in ("modify", "revise", "update these", "without notice", "without prior notice", "at any time", "sole and absolute discretion")):
         return {
@@ -1590,6 +1627,8 @@ with gr.Blocks(**blocks_kwargs) as demo:
             ledger_rows = []
             for m in AVAILABLE_MODELS:
                 s = MODELS_SUMMARY_MAP.get(m, {})
+                vram_str = f"{s['peak_vram_gb']:.2f} GB" if isinstance(s.get("peak_vram_gb"), (int, float)) and s["peak_vram_gb"] > 0 else "—"
+                speed_str = f"{s['avg_speed']:.0f} s/s" if isinstance(s.get("avg_speed"), (int, float)) and s["avg_speed"] > 0 else "—"
                 ledger_rows.append([
                     s.get("name", m),
                     s.get("params", "—"),
@@ -1597,18 +1636,21 @@ with gr.Blocks(**blocks_kwargs) as demo:
                     fmt_pct(s.get("test_recall")),
                     fmt_pct(s.get("test_f1")),
                     fmt_pct(s.get("test_accuracy")),
+                    vram_str,
+                    speed_str,
                     str(s.get("total_trials", 0)),
                 ])
 
             gr.Dataframe(
                 value=ledger_rows,
-                headers=["Model", "Parameters", "Precision", "Recall", "F1", "Accuracy", "Optuna trials"],
-                datatype=["str", "str", "str", "str", "str", "str", "str"],
+                headers=["Model", "Parameters", "Precision", "Recall", "F1", "Accuracy", "Peak VRAM", "Speed", "Optuna trials"],
+                datatype=["str", "str", "str", "str", "str", "str", "str", "str", "str"],
                 interactive=False,
                 wrap=True
             )
 
             if len(METRICS_DF) > 0:
+                has_vram_plot = "VRAM (GB)" in METRICS_DF.columns and METRICS_DF["VRAM (GB)"].dropna().count() > 0
                 with gr.Row():
                     with gr.Column():
                         gr.LinePlot(
@@ -1628,6 +1670,16 @@ with gr.Blocks(**blocks_kwargs) as demo:
                             title="Training loss by epoch",
                             tooltip=["Model", "Epoch", "Training loss"]
                         )
+                    if has_vram_plot:
+                        with gr.Column():
+                            gr.LinePlot(
+                                value=METRICS_DF,
+                                x="Epoch",
+                                y="VRAM (GB)",
+                                color="Model",
+                                title="VRAM Footprint (GB) by epoch",
+                                tooltip=["Model", "Epoch", "VRAM (GB)"]
+                            )
 
             with gr.Column(elem_classes=["hpo-block"]):
                 gr.HTML("""
@@ -1657,11 +1709,15 @@ with gr.Blocks(**blocks_kwargs) as demo:
                     lr = hp.get("learning_rate")
                     wd = hp.get("weight_decay")
                     frozen = hp.get("num_frozen_layers", 0)
+                    vram_part = f" · Peak VRAM {s['peak_vram_gb']:.2f} GB" if s.get("peak_vram_gb") else ""
+                    speed_part = f" · {s['avg_speed']:.0f} samples/s" if s.get("avg_speed") else ""
+                    dur_part = f" · Duration {s['duration']}" if s.get("duration") else ""
                     line = (
                         f"{s.get('name', m_key)} · learning rate "
                         f"{f'{lr:.2e}' if isinstance(lr, (int, float)) else '—'} · "
                         f"weight decay {f'{wd:.4f}' if isinstance(wd, (int, float)) else '—'} · "
                         f"{frozen} frozen layers · {s.get('total_trials', 0)} trials"
+                        f"{vram_part}{speed_part}{dur_part}"
                     )
                     return line, OPTUNA_TRIALS_MAP.get(m_key, pd.DataFrame())
 

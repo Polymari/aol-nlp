@@ -51,11 +51,23 @@ MODEL_META = {
 }
 
 KEYWORDS_HIGH = [
-    r"arbitrat", r"class\s+action", r"waiver", r"dispute",
-    r"reserve\s+the\s+right\s+to", r"modify", r"revise", r"update", r"without\s+notice",
-    r"sell", r"market", r"advertis", r"third\s+part",
-    r"cannot\s+(ensure|warrant|guarantee)", r"no\s+warranty", r"indemni"
+    r"\barbitrat", r"class\s+action", r"\bwaiver\b", r"jury\s+trial",
+    r"reserve\s+the\s+right\s+to\s+(modify|change|revise|update|amend|alter|replace|discontinue)",
+    r"(may|can)\s+(modify|change|revise|update|amend|alter)\s+(these\s+)?(terms|agreement|policy|conditions)",
+    r"without\s+(prior\s+)?notice", r"at\s+(our\s+)?sole\s+discretion",
+    r"continued\s+use\s+.*constitutes\s+acceptance",
+    r"\b(sell|selling|monetize)\s+.*(data|information|activity)",
+    r"(share|transfer|provide|disclose)\s+.*(advertis|third\s+part|broker|partner)",
+    r"\b(data\s+broker|behavioral\s+profil|biometric)\b",
+    r"cannot\s+(ensure|warrant|guarantee)", r"no\s+warranty", r"without\s+warranty\s+of\s+any\s+kind",
+    r"as[- ]is\s+and\s+as[- ]available", r"disclaim(s)?\s+all\s+warrant",
+    r"\bindemni", r"hold\s+(us\s+)?harmless", r"defend\s+and\s+hold\s+harmless"
 ]
+
+RE_DATE_METADATA_STR = r"^\s*(last\s+)?(updated|modified|revised|reviewed|effective)(\s+date)?\s*[:\-]?\s*[A-Za-z0-9,\s/\.\-]+\s*$"
+RE_DOC_TITLE_STR = r"^\s*(terms\s+(of\s+(service|use)|and\s+conditions)|privacy\s+policy|user\s+agreement|end\s+user\s+license\s+agreement|eula|cookie\s+policy)\s*$"
+RE_PAGE_MARKERS_STR = r"^\s*(page\s+\d+(\s+of\s+\d+)?|[\-—]\s*\d+\s*[\-—]|\[\s*\d+\s*\])\s*$"
+RE_LEGAL_PREFIX_STR = r"^(\d+(\.\d+)*\.?|\([a-zA-Z0-9]+\)|[a-zA-Z]\.|\b(Section|Article|Clause)\s+\d+(\.\d+)*\.?)\s*$"
 
 WAIVER_HOSTILE_INDICATORS = [
     r"\bwaiv", r"\barbitrat", r"\brelinquish", r"\bgive\s+up",
@@ -76,8 +88,9 @@ BOILERPLATE_PATTERNS = [
     r"privacy\s+policy\s+effective\s+date",
     r"these\s+terms\s+(take\s+effect|apply|are\s+effective)",
     r"(effective|applies)\s+as\s+of\s+the\s+date\s+(shown|indicated|listed)",
-    r"by\s+using\s+(this|our)\s+(service|site|platform).{0,40}(you\s+agree|constitutes)",
+    r"by\s+(accessing\s+or\s+)?using\s+(this|our|the)\s+(service|site|platform|application|website).{0,60}(you\s+agree|constitutes)",
     r"if\s+you\s+(do\s+not\s+)?agree\s+with\s+(these|any\s+part\s+of\s+these)",
+    r"^(((Section|Article|Clause)\s+\d+(\.\d+)*\.?|\d+(\.\d+)*\.?)\s+)?(table\s+of\s+contents|introduction|overview|definitions|preamble|acceptance(\s+of\s+(these\s+)?terms)?|updates(\s+to\s+(these\s+)?(service|terms))?|general|miscellaneous|severability|entire\s+agreement|notices|contact(\s+us)?)\s*$"
 ]
 
 KEYWORDS_PRO_USER = [

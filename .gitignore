@@ -25,3 +25,5 @@ Thumbs.db
 logs.txt
 gotcha_space_git/
 gotcha-extractor-model-backup/
+.commandcode/
+
