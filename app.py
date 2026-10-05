@@ -562,6 +562,9 @@ html, body {
   background: var(--paper) !important;
   color: var(--ink) !important;
   font-family: var(--font-ui) !important;
+  height: auto !important;
+  min-height: 100% !important;
+  overflow-y: auto !important;
 }
 
 body.dark, :root.dark, .dark {
@@ -612,6 +615,8 @@ body.dark, :root.dark, .dark {
   color: var(--ink) !important;
   font-family: var(--font-ui) !important;
   max-width: none !important;
+  min-height: 100% !important;
+  overflow: visible !important;
   padding: 0 32px 72px !important;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -877,9 +882,10 @@ body.dark, :root.dark, .dark {
 
 .contract-input textarea {
   flex: 1 1 auto;
-  min-height: 320px;
-  max-height: 480px !important;
+  min-height: 220px;
+  max-height: 420px !important;
   overflow-y: auto !important;
+  overscroll-behavior-y: auto !important;
   background: #ffffff !important;
   border: 1px solid var(--rule-strong) !important;
   border-radius: var(--radius-md) !important;
@@ -1116,8 +1122,9 @@ body.dark, :root.dark, .dark {
 
 /* Document Reader Scroll Pane */
 .doc-reader-scroll {
-  max-height: 480px !important;
+  max-height: 520px !important;
   overflow-y: auto !important;
+  overscroll-behavior-y: auto !important;
   background: #ffffff !important;
   border: 1px solid var(--rule) !important;
   border-radius: var(--radius-md) !important;
@@ -1462,8 +1469,9 @@ body.dark, :root.dark, .dark {
 }
 
 .compare-reader-scroll {
-  max-height: 420px !important;
+  max-height: 480px !important;
   overflow-y: auto !important;
+  overscroll-behavior-y: auto !important;
   background: #ffffff !important;
   padding: 4px 0 !important;
   scrollbar-width: thin;
@@ -1645,18 +1653,61 @@ def build_theme():
     return theme
 
 
+HEAD_SCRIPTS = """
+<script src="https://cdnjs.cloudflare.com/ajax/libs/iframe-resizer/4.3.2/iframeResizer.contentWindow.min.js"></script>
+<script>
+(function() {
+  function syncHeight() {
+    try {
+      var doc = document.documentElement;
+      var body = document.body;
+      var h = Math.max(
+        body ? body.scrollHeight : 0,
+        doc ? doc.scrollHeight : 0,
+        body ? body.offsetHeight : 0,
+        doc ? doc.offsetHeight : 0
+      );
+      if (h > 0 && window.parent && window.parent !== window) {
+        window.parent.postMessage('[iFrameSizer]iFrameResizer0:' + h + ':0:scroll', '*');
+        window.parent.postMessage({ type: 'resize', height: h }, '*');
+        window.parent.postMessage({ type: 'setHeight', height: h }, '*');
+        window.parent.postMessage({ 'iframe-height': h }, '*');
+        window.parent.postMessage({ height: h }, '*');
+      }
+    } catch(e) {}
+  }
+
+  window.addEventListener('load', syncHeight);
+  window.addEventListener('resize', syncHeight);
+  document.addEventListener('DOMContentLoaded', syncHeight);
+
+  if (window.MutationObserver) {
+    var obs = new MutationObserver(syncHeight);
+    obs.observe(document.documentElement, {
+      attributes: true,
+      childList: true,
+      subtree: true
+    });
+  }
+
+  setInterval(syncHeight, 600);
+})();
+</script>
+"""
+
 theme = build_theme()
 
 if gr_major >= 6:
     blocks_kwargs = {}
-    launch_kwargs = {"theme": theme, "css": CUSTOM_CSS}
+    launch_kwargs = {"theme": theme, "css": CUSTOM_CSS, "head": HEAD_SCRIPTS}
 else:
-    blocks_kwargs = {"theme": theme, "css": CUSTOM_CSS}
+    blocks_kwargs = {"theme": theme, "css": CUSTOM_CSS, "head": HEAD_SCRIPTS}
     launch_kwargs = {}
 
 with gr.Blocks(**blocks_kwargs) as demo:
 
     gr.HTML(f"<style>{CUSTOM_CSS}</style>", visible=False)
+    gr.HTML(HEAD_SCRIPTS, visible=False)
 
     # Masthead — modern legal auditor navigation
     gr.HTML("""
