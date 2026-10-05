@@ -258,23 +258,22 @@ def render_findings(results):
     return "".join(items)
 
 
-FINDINGS_HEAD_TEMPLATE = """
-<div class="findings-header">
-  <div class="findings-title-group">
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-    <span class="findings-heading">Legal Risk Breakdown & Rights Impact</span>
-  </div>
-  <span class="findings-count-pill">{count} Clause{'' if count == 1 else 's'} Analyzed</span>
-</div>
-"""
-
-
 def render_findings_block(results):
     """Findings section with structured legal risk cards."""
     flagged = [(seg.strip(), label) for seg, label in results if label and seg.strip()]
     if not flagged:
         return ""
-    head = FINDINGS_HEAD_TEMPLATE.format(count=len(flagged))
+    count = len(flagged)
+    plural = "" if count == 1 else "s"
+    head = (
+        f'<div class="findings-header">'
+        f'<div class="findings-title-group">'
+        f'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>'
+        f'<span class="findings-heading">Legal Risk Breakdown & Rights Impact</span>'
+        f'</div>'
+        f'<span class="findings-count-pill">{count} Clause{plural} Analyzed</span>'
+        f'</div>'
+    )
     body = render_findings(results)
     return f'<div class="findings-section">{head}<div class="findings-list">{body}</div></div>'
 
@@ -355,37 +354,38 @@ def empty_state(has_text):
 # ---------------------------------------------------------------------------
 
 def to_highlight_pairs(results):
-    """Normalize classified segments for HighlightedText.
+    """Normalize and coalesce contiguous segments with identical labels.
 
-    The pipeline emits inter-sentence whitespace as its own (label=None)
-    segment. Gradio hides those spans when show_whitespaces is off, which
-    glues adjacent words together and breaks them mid-token. Folding the
-    whitespace into the preceding segment keeps the prose intact.
+    Drastically minimizes DOM nodes created by Gradio HighlightedText,
+    preventing UI freezes on large contracts while preserving exact text.
     """
+    if not results:
+        return []
+
     pairs = []
     for segment, label in results:
-        if not pairs:
-            if segment.strip():
-                pairs.append([segment, label])
+        if not segment:
             continue
-        if not segment.strip():
+        if pairs and pairs[-1][1] == label:
             pairs[-1][0] += segment
         else:
             pairs.append([segment, label])
+
     return [(text, label) for text, label in pairs]
+
 
 
 def analyze_single(text, model_name, min_tokens):
     """Run the classifier and return every output the workspace needs.
 
-    Returns (annotated_text, summary_html, findings_html, label_update,
-    text_update). The two updates reveal the annotated-text heading and
-    panel together, and only when there is something to show.
+    Returns (annotated_update, summary_html, findings_html, label_update).
+    The updates reveal the annotated-text heading and panel together, and only
+    when there is something to show.
     """
-    hidden = (gr.update(visible=False), gr.update(visible=False))
+    hidden = (gr.update(value=[], visible=False), empty_state(False), "", gr.update(visible=False))
 
     if not text or not text.strip():
-        return [], empty_state(False), "", *hidden
+        return hidden
 
     start = time.time()
     try:
@@ -395,7 +395,7 @@ def analyze_single(text, model_name, min_tokens):
             f'<div class="notice notice-error"><p class="empty-title">Analysis failed</p>'
             f'<p class="empty-body">{e}</p></div>'
         )
-        return [], empty_state(True), error, *hidden
+        return gr.update(value=[], visible=False), empty_state(True), error, gr.update(visible=False)
     elapsed = (time.time() - start) * 1000
 
     counts = {"high": 0, "medium": 0, "low": 0}
@@ -408,14 +408,13 @@ def analyze_single(text, model_name, min_tokens):
             counts["low"] += 1
 
     if sum(counts.values()) == 0:
-        return [], empty_state(True), "", *hidden
+        return gr.update(value=[], visible=False), empty_state(True), "", gr.update(visible=False)
 
-    shown = (gr.update(visible=True), gr.update(visible=True))
     return (
-        to_highlight_pairs(results),
+        gr.update(value=to_highlight_pairs(results), visible=True),
         render_summary(counts, elapsed),
         render_findings_block(results),
-        *shown,
+        gr.update(visible=True),
     )
 
 
@@ -424,7 +423,14 @@ def compare_all(text, min_tokens):
         return [], [], [], [], pd.DataFrame()
 
     e, tb, bm, bt, df = gotcha_compare_models(text, min_tokens=min_tokens)
-    return e, tb, bm, bt, df
+    return (
+        to_highlight_pairs(e),
+        to_highlight_pairs(tb),
+        to_highlight_pairs(bm),
+        to_highlight_pairs(bt),
+        df
+    )
+
 
 
 # ---------------------------------------------------------------------------
@@ -872,6 +878,8 @@ body.dark, :root.dark, .dark {
 .contract-input textarea {
   flex: 1 1 auto;
   min-height: 320px;
+  max-height: 480px !important;
+  overflow-y: auto !important;
   background: #ffffff !important;
   border: 1px solid var(--rule-strong) !important;
   border-radius: var(--radius-md) !important;
@@ -882,6 +890,25 @@ body.dark, :root.dark, .dark {
   padding: 14px 16px !important;
   transition: border-color 140ms ease, box-shadow 140ms ease !important;
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.02) !important;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 #f8fafc;
+}
+
+.contract-input textarea::-webkit-scrollbar {
+  width: 6px;
+}
+
+.contract-input textarea::-webkit-scrollbar-track {
+  background: #f8fafc;
+}
+
+.contract-input textarea::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+.contract-input textarea::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
 }
 
 .contract-input textarea:focus {
@@ -1414,19 +1441,58 @@ body.dark, :root.dark, .dark {
 
 .compare-grid {
   display: grid !important;
-  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
   gap: 20px !important;
   align-items: start !important;
+  margin-top: 14px !important;
 }
 
 .compare-grid > * { min-width: 0 !important; }
 
-@media (max-width: 1100px) {
-  .compare-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+@media (max-width: 860px) {
+  .compare-grid { grid-template-columns: minmax(0, 1fr) !important; }
 }
 
-@media (max-width: 640px) {
-  .compare-grid { grid-template-columns: minmax(0, 1fr) !important; }
+.compare-card {
+  background: #ffffff !important;
+  border: 1px solid var(--rule) !important;
+  border-radius: var(--radius-md) !important;
+  padding: 16px 18px !important;
+  box-shadow: var(--shadow-card) !important;
+}
+
+.compare-reader-scroll {
+  max-height: 420px !important;
+  overflow-y: auto !important;
+  background: #ffffff !important;
+  padding: 4px 0 !important;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 #f8fafc;
+}
+
+.compare-reader-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.compare-reader-scroll::-webkit-scrollbar-track {
+  background: #f8fafc;
+}
+
+.compare-reader-scroll::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+.compare-reader-scroll::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.compare-hint {
+  font-family: var(--font-ui);
+  font-size: 0.86rem;
+  font-weight: 500;
+  color: var(--ink-faint);
+  margin: 18px 0 8px;
 }
 
 .compare-grid .token,
@@ -1711,7 +1777,7 @@ with gr.Blocks(**blocks_kwargs) as demo:
             analyze_btn.click(
                 fn=analyze_single,
                 inputs=[text_input, model_dropdown, min_tokens_slider],
-                outputs=[annotated, summary_output, findings_output, annotated_label, annotated]
+                outputs=[annotated, summary_output, findings_output, annotated_label]
             )
 
         # -------------------------------------------------------------------
@@ -1849,6 +1915,7 @@ with gr.Blocks(**blocks_kwargs) as demo:
             comp_text_input = gr.Textbox(
                 lines=5,
                 label="Contract text",
+                elem_classes=["contract-input"],
                 value="We reserve the right to modify these terms at any time without notice. In the event "
                       "of a dispute, you waive your right to a class action lawsuit and agree to binding arbitration.",
             )
@@ -1864,19 +1931,31 @@ with gr.Blocks(**blocks_kwargs) as demo:
                 )
                 compare_btn = gr.Button("Run all four models", variant="primary", elem_classes=["btn-primary"])
 
+            comparison_df = gr.Dataframe(
+                headers=["Model", "Validation F1 (Best)", "Parameters", "Disk Size", "Risks Detected", "Latency (ms)"],
+                datatype=["str", "str", "str", "str", "number", "str"],
+                label="Benchmark metrics",
+                interactive=False,
+                wrap=True
+            )
+
+            gr.HTML('<p class="compare-hint">Annotated clause comparison across backbones:</p>')
+
             def compare_cards(text, min_tokens):
-                panels = compare_all(text, min_tokens)
-                shown = [gr.update(visible=True)] * len(COMPARE_PANELS)
-                return *panels, *shown
+                e, tb, bm, bt, df = compare_all(text, min_tokens)
+                return (
+                    gr.update(value=e, visible=True),
+                    gr.update(value=tb, visible=True),
+                    gr.update(value=bm, visible=True),
+                    gr.update(value=bt, visible=True),
+                    df
+                )
 
-            gr.HTML('<p class="compare-hint">Run the benchmark to populate these panels.</p>')
-
-            # Panels start hidden so the resting state is a sentence rather
-            # than four empty frames, and reveal together after a run.
+            # Panels reveal together with bounded scrollable panes
             compare_outputs = []
             with gr.Row(elem_classes=["compare-grid"]):
                 for name, f1 in COMPARE_PANELS:
-                    with gr.Column():
+                    with gr.Column(elem_classes=["compare-card"]):
                         gr.HTML(
                             f'<div class="model-head"><span class="model-name">{name}</span>'
                             f'<span class="model-f1">F1 {f1}</span></div>'
@@ -1890,24 +1969,16 @@ with gr.Blocks(**blocks_kwargs) as demo:
                                 show_legend=False,
                                 visible=False,
                                 color_map=COLOR_MAP,
-                                elem_classes=["highlighted-text"],
+                                elem_classes=["highlighted-text", "compare-reader-scroll"],
                             )
                         )
-
-            comparison_df = gr.Dataframe(
-                headers=["Model", "Validation F1 (Best)", "Parameters", "Disk Size", "Risks Detected", "Latency (ms)"],
-                datatype=["str", "str", "str", "str", "number", "str"],
-                label="Benchmark metrics",
-                interactive=False,
-                wrap=True
-            )
 
             compare_btn.click(
                 fn=compare_cards,
                 inputs=[comp_text_input, comp_tokens_slider],
-                outputs=[*compare_outputs, comparison_df, *compare_outputs],
+                outputs=[*compare_outputs, comparison_df],
             )
 
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860, **launch_kwargs)
+    demo.launch(server_name="0.0.0.0", server_port=7860, show_error=True, **launch_kwargs)
